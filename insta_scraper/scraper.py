@@ -128,8 +128,7 @@ def scrape(
 
     amount = scan_limit if scan_limit and scan_limit > 0 else 0  # 0 == all
     progress.start(
-        f"scanning {'all' if amount == 0 else f'up to {amount}'} comments "
-        "(1 dot/page, ~1–3s each)"
+        f"scanning {'all' if amount == 0 else f'up to {amount}'} comments (1 dot/page)"
     )
     raw_comments = _scan_comments(client, pk, amount, progress.tick)
     progress.ok(f"{len(raw_comments)} comments → top 10 by {sort}")
