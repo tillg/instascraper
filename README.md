@@ -84,6 +84,79 @@ All saved options live in `~/.config/insta_scraper/.env`. `instascrape -h` shows
 everything. Exit codes: `0` all good · `1` some items skipped · `2` fatal
 (auth / rate limit — stopped early).
 
+## Use as a library
+
+`instascrape` is a thin CLI over a small, importable API — you can drive it from
+your own Python instead of shelling out. Install it into your environment
+(`pip install -e .`, or `pip install git+https://github.com/tillg/instascrape`)
+and import from the `insta_scraper` package.
+
+### Quick start: URL → folder
+
+```python
+from insta_scraper.auth import get_client
+from insta_scraper.url import parse_shortcode
+from insta_scraper.scraper import scrape
+from insta_scraper.writer import write_result
+
+# Logs in once and persists the session; later calls reuse it (no password).
+# Omit username/password to use the saved session / IG_USERNAME / IG_PASSWORD.
+client, account = get_client(username="me", password="pw")
+
+url = "https://www.instagram.com/reel/DXOCAyzEX8i/"
+media, result = scrape(client, parse_shortcode(url), url, account)
+out_dir = write_result(client, media, result, output_base="output")
+print("wrote", out_dir)
+```
+
+### Just the data (no files written)
+
+`scrape()` returns a plain `ScrapeResult` dataclass — use it directly, e.g. to
+push into your own DB or pipeline:
+
+```python
+media, result = scrape(client, parse_shortcode(url), url, account,
+                       sort="likes", scan_limit=200)
+
+print(result.owner, result.is_video, result.likes)
+print(result.caption)
+for c in result.comments:            # already ranked, top 10
+    print(c.likes, c.username, c.text)
+
+# Machine-readable dict (JSON-serializable), without downloading media:
+from insta_scraper.writer import render_metadata
+meta = render_metadata(result, media_files=[])
+```
+
+### Public API
+
+| Import | Purpose |
+|--------|---------|
+| `auth.get_client(username=None, password=None, browser=None, session_file=None, progress=None) -> (Client, account)` | Log in / reuse a persisted session; returns an `instagrapi.Client` and the account name. |
+| `url.parse_shortcode(url) -> str` | Extract the shortcode from a `/p/`, `/reel/` or `/tv/` URL. Raises `ValueError` if unrecognized. |
+| `scraper.scrape(client, shortcode, source_url, account, sort="likes", scan_limit=200, progress=None) -> (media, ScrapeResult)` | Fetch metadata + ranked comments. No download. |
+| `writer.write_result(client, media, result, output_base, progress=None) -> Path` | Download all media and write `post.md` + `metadata.json`. |
+| `writer.render_markdown(result, media_files) / render_metadata(result, media_files)` | Pure renderers (no I/O / network). |
+| `scraper.select_top_comments(comments, n=10, sort="likes")` | Pure comment-ranking helper. |
+| `models.ScrapeResult`, `models.Comment`, `models.Provenance` | The data carriers. |
+
+### Notes for integrators
+
+- **Auth & sessions** — `get_client` persists the session to
+  `~/.config/insta_scraper/session-<user>.json` (override with `session_file=`)
+  and reuses it; pass `username`/`password` only when there's no valid session.
+  First login may need a 2FA/challenge code (prompted on stdin) — supply
+  credentials up front in headless setups, or pre-create the session once
+  interactively.
+- **Progress** — pass any object with `start(label)`, `ok(result)`, `tick()`,
+  `stage(msg)`, `done()` as `progress=` to get callbacks; omit it for silence
+  (the default `NullProgress`).
+- **Errors** — `instagrapi` exceptions propagate (`MediaNotFound`,
+  `LoginRequired`, `PleaseWaitFewMinutes`, …); `parse_shortcode` raises
+  `ValueError`. Catch these to classify retry vs. skip vs. fatal.
+- **Pacing** — the client uses `delay_range = [1, 3]`, so each request sleeps a
+  random 1–3 s. Expect a single post to take tens of seconds; batch accordingly.
+
 ## About "top 10 comments"
 
 Instagram's in-app "top comments" ranking is algorithmic and **not** exposed;
