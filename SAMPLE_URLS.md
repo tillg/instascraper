@@ -1,0 +1,10 @@
+* https://www.instagram.com/reel/DXOCAyzEX8i/
+* https://www.instagram.com/reel/DZ_KsKvKAW0/
+* https://www.instagram.com/reel/DZ74ozYM30a/
+* https://www.instagram.com/reel/DZSg37uTTRc/
+* https://www.instagram.com/reel/DZ71hUfiZIO/
+* https://www.instagram.com/reel/DXSzphPjtSm/
+* https://www.instagram.com/reel/DZ33SNmDOf0/
+* https://www.instagram.com/reel/DZxmXbvoy7O/
+* https://www.instagram.com/reel/DZ71hUfiZIO/
+* https://www.instagram.com/reel/DZWyZzugn-z/

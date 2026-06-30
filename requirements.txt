@@ -1,0 +1,5 @@
+instagrapi>=2.16
+browser_cookie3>=0.19
+
+# dev
+pytest>=8.0

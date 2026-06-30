@@ -1,0 +1,17 @@
+# Scraper output and secrets
+output/
+data/
+*.session
+.instagram_sessions/
+.env
+
+# Browser-agent / long-run artifacts
+tmp/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
