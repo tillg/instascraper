@@ -1,12 +1,16 @@
 # ─── instascrape: scraped output & secrets ──────────────────────────────────
-output/                 # default scrape target
-data/                   # common --target-dir
-instagram_archives/     # alt output names
-*.session               # legacy session files
-.instagram_sessions/
-.env                    # credentials / option defaults (also kept in ~/.config)
+# Scraped posts (default and common --target-dir locations)
+output/
+data/
+instagram_archives/
+# Credentials / saved session (also kept in ~/.config/insta_scraper/)
+.env
 *.env
-!.env.example           # but do track a template, if present
+*.session
+session-*.json
+.instagram_sessions/
+# ...but do track a template if you add one
+!.env.example
 
 # ─── Logs & temp artifacts ──────────────────────────────────────────────────
 tmp/
@@ -49,8 +53,6 @@ coverage.xml
 *.swp
 *.swo
 *~
-.\#*
-\#*\#
 
 # ─── macOS / OS cruft ───────────────────────────────────────────────────────
 .DS_Store
