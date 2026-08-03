@@ -95,7 +95,7 @@ everything. Exit codes: `0` all good · `1` some items skipped · `2` fatal
 
 `instascrape` is a thin CLI over a small, importable API — you can drive it from
 your own Python instead of shelling out. Install it into your environment
-(`pip install -e .`, or `pip install git+https://github.com/tillg/instascrape`)
+(`pip install -e .`, or `pip install git+https://github.com/tillg/instascraper`)
 and import from the `instascraper` package.
 
 ### Quick start: URL → folder
