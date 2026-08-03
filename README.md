@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/logo/instascraper-dark.svg">
+    <img src="docs/logo/instascraper-light.svg" alt="instascraper" width="112" height="112">
+  </picture>
+</p>
+
 # insta_scraper
 
 Archive an Instagram **post** or **reel** from its URL into a self-contained
