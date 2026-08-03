@@ -1,6 +1,6 @@
 """Network-free tests for the .env config store."""
 
-from insta_scraper.config import load_config, save_config
+from instascraper.config import load_config, save_config
 
 
 def test_save_and_load_roundtrip(tmp_path):

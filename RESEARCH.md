@@ -1,4 +1,4 @@
-# Research about insta-scraping
+# Research about instascraping
 
 This is the topic I want to research:
 Based on a URL I want to scrape an instagram post or real. 

@@ -15,7 +15,7 @@ Dependencies: `instagrapi`, `browser_cookie3`.
 
 ```mermaid
 flowchart TD
-    CLI["cli.py — argparse, option resolution, Progress UI"] --> CONFIG["config.py — ~/.config/insta_scraper/.env"]
+    CLI["cli.py — argparse, option resolution, Progress UI"] --> CONFIG["config.py — ~/.config/instascraper/.env"]
     CLI --> AUTH["auth.py — get_client()"]
     CLI --> URLP["url.py — parse_shortcode()"]
     CLI --> SCRAPE["scraper.py — scrape(), select_top_comments()"]
@@ -57,7 +57,7 @@ flowchart TD
     Save --> Ready
 ```
 
-- Session persisted to `~/.config/insta_scraper/session-<user>.json`; reuse needs
+- Session persisted to `~/.config/instascraper/session-<user>.json`; reuse needs
   no password and works non-interactively. Device UUIDs are kept stable across
   re-logins (the anti-flag measure).
 - `delay_range = [1, 3]` and `request_timeout = 15` on the client; the CLI also
@@ -103,7 +103,7 @@ media files. The pure renderers make output testable without network.
   codes 0/1/2.
 - **Library use**: `get_client`, `parse_shortcode`, `scrape`, `write_result`,
   renderers, and models are importable (see README "Use as a library").
-- **Secrets**: credentials + session live under `~/.config/insta_scraper/`;
+- **Secrets**: credentials + session live under `~/.config/instascraper/`;
   `output/`, `data/`, `.env`, `session-*.json` are git-ignored.
 - **Tests**: network-free suite (URL parsing, comment ranking + paging,
   rendering, config, option resolution, progress, auth helpers).

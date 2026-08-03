@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from insta_scraper.models import Comment
-from insta_scraper.scraper import select_top_comments
+from instascraper.models import Comment
+from instascraper.scraper import select_top_comments
 
 
 def test_likes_ranking():

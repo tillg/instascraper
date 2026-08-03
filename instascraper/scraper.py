@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 from instagrapi.extractors import extract_comment
 
-from insta_scraper.models import Comment, Provenance, ScrapeResult
+from instascraper.models import Comment, Provenance, ScrapeResult
 
 
 class NullProgress:

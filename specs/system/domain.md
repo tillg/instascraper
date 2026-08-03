@@ -63,7 +63,7 @@ erDiagram
 | **Credentials** | The user's Instagram username + password. Needed only for the first login; afterwards the session is reused. Persisted (chmod 600) in the config `.env`. |
 | **2FA / challenge** | A verification code (email/SMS) Instagram may require on a fresh login; prompted for interactively. |
 | **Provenance / methods header** | A record of how an export was made (fetch time, backend + version, account, comment-sort rule, scan depth), written into `post.md` and `metadata.json`. |
-| **Config** | Persisted credentials + option defaults at `~/.config/insta_scraper/.env`. |
+| **Config** | Persisted credentials + option defaults at `~/.config/instascraper/.env`. |
 | **Output directory** | `<target-dir>/<shortcode>/` holding `post.md`, media files, and `metadata.json`. |
 
 ## Actors & key rules

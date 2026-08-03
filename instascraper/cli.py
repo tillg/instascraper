@@ -2,7 +2,7 @@
 
 Options resolve in this order: explicit CLI flag > saved config (.env) >
 environment variable > built-in default. After a successful login the resolved
-options are saved back to ~/.config/insta_scraper/.env so they can be omitted
+options are saved back to ~/.config/instascraper/.env so they can be omitted
 next time.
 """
 
@@ -17,11 +17,11 @@ from pathlib import Path
 
 import instagrapi.exceptions as igex
 
-from insta_scraper.auth import get_client
-from insta_scraper.config import CONFIG_PATH, ENV_KEYS, load_config, save_config
-from insta_scraper.scraper import scrape
-from insta_scraper.url import parse_shortcode
-from insta_scraper.writer import write_result
+from instascraper.auth import get_client
+from instascraper.config import CONFIG_PATH, ENV_KEYS, load_config, save_config
+from instascraper.scraper import scrape
+from instascraper.url import parse_shortcode
+from instascraper.writer import write_result
 
 _URL_RE = re.compile(r"https?://(?:www\.)?instagram\.com/\S+")
 
@@ -105,7 +105,7 @@ output (one folder per post):
 
 auth & config:
   - First login needs --username/--password (or --browser). The session is then
-    persisted to ~/.config/insta_scraper/session-<user>.json and reused, with a
+    persisted to ~/.config/instascraper/session-<user>.json and reused, with a
     stable device id, so you are not re-logging-in (and tripping Instagram) each run.
   - 2FA / security-challenge codes (email or SMS) are prompted for when needed.
   - Options & credentials are saved to {CONFIG_PATH} (chmod 600) unless

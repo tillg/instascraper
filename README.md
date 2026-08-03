@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-# insta_scraper
+# instascraper
 
 Archive an Instagram **post** or **reel** from its URL into a self-contained
 folder: all media (images + videos, including carousels), the caption, and the
@@ -28,9 +28,9 @@ pip install -e .          # installs deps + the `instascrape` command
 ```
 
 This puts an `instascrape` executable in `.venv/bin/`, so after `activate` you
-can just run `instascrape …` (`insta-scraper` is a kept alias). On a
-pyenv-shimmed shell, a `python` function can shadow the venv interpreter — using
-the `instascrape` command or `./.venv/bin/python -m insta_scraper …` avoids that.
+can just run `instascrape …`. On a pyenv-shimmed shell, a `python` function can
+shadow the venv interpreter — using the `instascrape` command or
+`./.venv/bin/python -m instascraper …` avoids that.
 
 ## Login & config
 
@@ -40,8 +40,8 @@ non-interactively) and re-login only if the session dies — reusing the same
 device identity each time so Instagram doesn't flag a "new device" on every run.
 
 The first run takes your username + password; it then saves a durable session to
-`~/.config/insta_scraper/session-<username>.json`, and (unless `--no-save-config`)
-remembers your credentials and options in `~/.config/insta_scraper/.env`
+`~/.config/instascraper/session-<username>.json`, and (unless `--no-save-config`)
+remembers your credentials and options in `~/.config/instascraper/.env`
 (chmod 600) so you can omit them next time. If Instagram asks for a 2FA /
 security-challenge code (email or SMS), you'll be prompted for it.
 
@@ -80,14 +80,14 @@ instascrape --file SAMPLE_URLS.md --target-dir data --delay 8
 | `--username NAME` | stored config | Instagram account to log in as (saved) |
 | `--password PW` | stored config | Password — only needed for the first login (saved) |
 | `--target-dir DIR` | `output` | Base directory for the per-post folders (alias: `--output`) |
-| `--session-file PATH` | `~/.config/insta_scraper/session-<user>.json` | Where the session is stored/reused |
+| `--session-file PATH` | `~/.config/instascraper/session-<user>.json` | Where the session is stored/reused |
 | `--browser NAME` | off | Bootstrap login from a logged-in browser (safari, chrome, …) |
 | `--delay SECONDS` | `3` | Pause between items in batch mode |
 | `--comment-sort {likes,instagram}` | `likes` | Ranking rule for the top 10 (see below) |
 | `--comment-scan-limit N` | `200` | Comments to scan before ranking; `0` = all (slow, rate-limit risk) |
 | `--no-save-config` | off | Don't write credentials/options to the config file |
 
-All saved options live in `~/.config/insta_scraper/.env`. `instascrape -h` shows
+All saved options live in `~/.config/instascraper/.env`. `instascrape -h` shows
 everything. Exit codes: `0` all good · `1` some items skipped · `2` fatal
 (auth / rate limit — stopped early).
 
@@ -96,15 +96,15 @@ everything. Exit codes: `0` all good · `1` some items skipped · `2` fatal
 `instascrape` is a thin CLI over a small, importable API — you can drive it from
 your own Python instead of shelling out. Install it into your environment
 (`pip install -e .`, or `pip install git+https://github.com/tillg/instascrape`)
-and import from the `insta_scraper` package.
+and import from the `instascraper` package.
 
 ### Quick start: URL → folder
 
 ```python
-from insta_scraper.auth import get_client
-from insta_scraper.url import parse_shortcode
-from insta_scraper.scraper import scrape
-from insta_scraper.writer import write_result
+from instascraper.auth import get_client
+from instascraper.url import parse_shortcode
+from instascraper.scraper import scrape
+from instascraper.writer import write_result
 
 # Logs in once and persists the session; later calls reuse it (no password).
 # Omit username/password to use the saved session / IG_USERNAME / IG_PASSWORD.
@@ -131,7 +131,7 @@ for c in result.comments:            # already ranked, top 10
     print(c.likes, c.username, c.text)
 
 # Machine-readable dict (JSON-serializable), without downloading media:
-from insta_scraper.writer import render_metadata
+from instascraper.writer import render_metadata
 meta = render_metadata(result, media_files=[])
 ```
 
@@ -150,7 +150,7 @@ meta = render_metadata(result, media_files=[])
 ### Notes for integrators
 
 - **Auth & sessions** — `get_client` persists the session to
-  `~/.config/insta_scraper/session-<user>.json` (override with `session_file=`)
+  `~/.config/instascraper/session-<user>.json` (override with `session_file=`)
   and reuses it; pass `username`/`password` only when there's no valid session.
   First login may need a 2FA/challenge code (prompted on stdin) — supply
   credentials up front in headless setups, or pre-create the session once

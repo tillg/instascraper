@@ -1,6 +1,6 @@
 import pytest
 
-from insta_scraper.url import parse_shortcode
+from instascraper.url import parse_shortcode
 
 
 @pytest.mark.parametrize(

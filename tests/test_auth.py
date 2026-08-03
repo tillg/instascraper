@@ -2,8 +2,8 @@
 
 import pytest
 
-import insta_scraper.auth as auth
-from insta_scraper.auth import make_links_clickable
+import instascraper.auth as auth
+from instascraper.auth import make_links_clickable
 
 
 def test_relative_checkpoint_url_becomes_absolute():

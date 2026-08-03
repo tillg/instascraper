@@ -5,8 +5,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-from insta_scraper.models import Comment, Provenance, ScrapeResult
-from insta_scraper.writer import render_markdown, render_metadata
+from instascraper.models import Comment, Provenance, ScrapeResult
+from instascraper.writer import render_markdown, render_metadata
 
 
 @pytest.fixture
@@ -126,4 +126,4 @@ def test_metadata_roundtrips_through_json(result: ScrapeResult) -> None:
     }
     assert reloaded["comments"][1]["created_at"] is None
     assert reloaded["provenance"]["comment_sort"] == "likes"
-    assert reloaded["provenance"]["tool"] == "insta_scraper"
+    assert reloaded["provenance"]["tool"] == "instascraper"

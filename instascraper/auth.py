@@ -20,9 +20,9 @@ from pathlib import Path
 from instagrapi import Client
 from instagrapi.exceptions import TwoFactorRequired
 
-from insta_scraper.scraper import NullProgress
+from instascraper.scraper import NullProgress
 
-DEFAULT_SESSION_DIR = Path.home() / ".config" / "insta_scraper"
+DEFAULT_SESSION_DIR = Path.home() / ".config" / "instascraper"
 INSTAGRAM_BASE = "https://www.instagram.com"
 SUPPORTED_BROWSERS = ("safari", "chrome", "brave", "edge", "firefox", "chromium", "opera", "vivaldi")
 

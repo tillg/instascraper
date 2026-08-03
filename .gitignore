@@ -3,7 +3,7 @@
 output/
 data/
 instagram_archives/
-# Credentials / saved session (also kept in ~/.config/insta_scraper/)
+# Credentials / saved session (also kept in ~/.config/instascraper/)
 .env
 *.env
 *.session
@@ -61,3 +61,4 @@ coverage.xml
 .Spotlight-V100
 .Trashes
 Thumbs.db
+.playwright-mcp/

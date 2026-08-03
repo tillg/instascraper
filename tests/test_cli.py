@@ -2,7 +2,7 @@
 
 import pytest
 
-from insta_scraper.cli import _urls_from_file, build_parser, resolve_options
+from instascraper.cli import _urls_from_file, build_parser, resolve_options
 
 
 def test_urls_from_file_extracts_instagram_urls(tmp_path):
@@ -56,7 +56,7 @@ def test_resolve_precedence_cli_over_config_over_env_over_default():
 
 
 def test_progress_start_ok_on_one_line(capsys):
-    from insta_scraper.cli import Progress
+    from instascraper.cli import Progress
 
     p = Progress()
     p.start("logging in as @tillg")
@@ -65,7 +65,7 @@ def test_progress_start_ok_on_one_line(capsys):
 
 
 def test_progress_dots_between_start_and_ok(capsys):
-    from insta_scraper.cli import Progress
+    from instascraper.cli import Progress
 
     p = Progress()
     p.start("scanning up to 200 comments")

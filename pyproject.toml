@@ -3,7 +3,7 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "insta_scraper"
+name = "instascraper"
 version = "0.1.0"
 description = "Archive an Instagram post/reel URL to a local folder (media + caption + top 10 comments)."
 requires-python = ">=3.10"
@@ -13,8 +13,7 @@ dependencies = ["instagrapi>=2.16", "browser_cookie3>=0.19"]
 dev = ["pytest>=8.0"]
 
 [project.scripts]
-instascrape = "insta_scraper.cli:main"
-insta-scraper = "insta_scraper.cli:main"
+instascrape = "instascraper.cli:main"
 
 [tool.setuptools]
-packages = ["insta_scraper"]
+packages = ["instascraper"]

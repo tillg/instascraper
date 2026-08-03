@@ -30,7 +30,7 @@ class Provenance:
     account: str
     comment_sort: str          # "likes" | "instagram"
     comment_scan_limit: int    # 0 == scanned all
-    tool: str = "insta_scraper"
+    tool: str = "instascraper"
 
 
 @dataclass

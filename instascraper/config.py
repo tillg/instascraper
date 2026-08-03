@@ -1,6 +1,6 @@
 """Persist credentials and option defaults to a private `.env`.
 
-Stored at ~/.config/insta_scraper/.env (chmod 600, never committed). Lets the
+Stored at ~/.config/instascraper/.env (chmod 600, never committed). Lets the
 user pass --username/--password/--target-dir etc. once and omit them next time.
 """
 
@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-CONFIG_DIR = Path.home() / ".config" / "insta_scraper"
+CONFIG_DIR = Path.home() / ".config" / "instascraper"
 CONFIG_PATH = CONFIG_DIR / ".env"
 
 # CLI option dest -> .env key
@@ -47,7 +47,7 @@ def save_config(updates: dict[str, str], path: Path = CONFIG_PATH) -> None:
             cfg[key] = str(value)
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
-        "# insta_scraper config — credentials + option defaults.",
+        "# instascraper config — credentials + option defaults.",
         "# Auto-written by `instascrape`. chmod 600; never commit.",
     ]
     lines += [f"{k}={v}" for k, v in cfg.items()]

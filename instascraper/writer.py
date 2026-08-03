@@ -14,8 +14,8 @@ import urllib.request
 from dataclasses import asdict
 from pathlib import Path
 
-from insta_scraper.models import Comment, Provenance, ScrapeResult
-from insta_scraper.scraper import NullProgress
+from instascraper.models import Comment, Provenance, ScrapeResult
+from instascraper.scraper import NullProgress
 
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
 VIDEO_EXTS = (".mp4", ".mov")

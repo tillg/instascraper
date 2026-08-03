@@ -4,8 +4,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-import insta_scraper.scraper as scraper
-from insta_scraper.scraper import _scan_comments, scrape
+import instascraper.scraper as scraper
+from instascraper.scraper import _scan_comments, scrape
 
 
 class _User:
