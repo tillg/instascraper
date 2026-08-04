@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import urllib.request
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
 from instascraper.models import Comment, Provenance, ScrapeResult
-from instascraper.writer import render_markdown, render_metadata
+from instascraper.writer import render_markdown, render_metadata, write_result
 
 
 @pytest.fixture
@@ -130,6 +132,137 @@ def test_no_media_and_no_comments() -> None:
     assert "_No media files._" in md
     assert "_No comments returned._" in md
     assert "0 comments scanned (no limit)" in md
+
+
+# --- downloads go through the private API only -----------------------------
+
+
+class _Resource:
+    def __init__(self, pk, media_type, thumbnail_url=None, video_url=None):
+        self.pk = pk
+        self.media_type = media_type
+        self.thumbnail_url = thumbnail_url
+        self.video_url = video_url
+
+
+class _Album:
+    pk = "3877045179849473826"
+    media_type = 8
+    thumbnail_url = None
+    resources = [
+        _Resource("r1", 1, thumbnail_url="https://cdn.example.com/one.jpg"),
+        _Resource("r2", 2, video_url="https://cdn.example.com/two.mp4"),
+        _Resource("r3", 1, thumbnail_url="https://cdn.example.com/three.jpg"),
+    ]
+
+
+class _Video:
+    pk = "3877045179849473826"
+    media_type = 2
+    video_url = "https://cdn.example.com/reel.mp4"
+    thumbnail_url = "https://cdn.example.com/cover.jpg"
+
+
+class _Photo:
+    pk = "3877045179849473826"
+    media_type = 1
+    thumbnail_url = "https://cdn.example.com/pic.jpg"
+    video_url = None
+
+
+class _DownloadClient:
+    """Records by-URL downloads and creates the files, like instagrapi does.
+
+    The metadata-refetching helpers are booby-trapped: each one reaches
+    instagrapi's dead web-GraphQL fallback (`photo_download` tries it *first*),
+    which answers 200 with an HTML login wall. `write_result` already holds the
+    `media` object, so it must never call them.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    def _write(self, url, filename, folder):
+        path = Path(folder) / f"{filename}.{url.rsplit('.', 1)[1]}"
+        path.write_bytes(b"fake-media")
+        return path
+
+    def photo_download_by_url(self, url, filename="", folder="", overwrite=True):
+        self.calls.append(("photo", url))
+        return self._write(url, filename, folder)
+
+    def video_download_by_url(self, url, filename="", folder="", overwrite=True):
+        self.calls.append(("video", url))
+        return self._write(url, filename, folder)
+
+    def album_download(self, *a, **k):
+        raise AssertionError("album_download re-fetches metadata via media_info")
+
+    def photo_download(self, *a, **k):
+        raise AssertionError("photo_download tries web GraphQL first")
+
+    def video_download(self, *a, **k):
+        raise AssertionError("video_download re-fetches metadata")
+
+
+@pytest.fixture
+def no_cover_network(monkeypatch):
+    """Stub the cover fetch at the network boundary (urllib), not in our code."""
+    def fake_urlretrieve(url, dest):
+        Path(dest).write_bytes(b"fake-cover")
+        return dest, None
+
+    monkeypatch.setattr(urllib.request, "urlretrieve", fake_urlretrieve)
+
+
+def test_album_downloads_every_resource_in_carousel_order(result, tmp_path, no_cover_network):
+    client = _DownloadClient()
+    out = write_result(client, _Album(), result, str(tmp_path))
+    assert client.calls == [
+        ("photo", "https://cdn.example.com/one.jpg"),
+        ("video", "https://cdn.example.com/two.mp4"),
+        ("photo", "https://cdn.example.com/three.jpg"),
+    ]
+    assert sorted(p.name for p in out.glob("DXOCAyzEX8i*")) == [
+        "DXOCAyzEX8i_1.jpg", "DXOCAyzEX8i_2.mp4", "DXOCAyzEX8i_3.jpg",
+    ]
+
+
+def test_single_video_downloads_by_url_and_still_gets_a_cover(result, tmp_path, no_cover_network):
+    client = _DownloadClient()
+    out = write_result(client, _Video(), result, str(tmp_path))
+    assert client.calls == [("video", "https://cdn.example.com/reel.mp4")]
+    names = sorted(p.name for p in out.glob("DXOCAyzEX8i.*"))
+    assert names == ["DXOCAyzEX8i.jpg", "DXOCAyzEX8i.mp4"]  # video + cover
+
+
+def test_single_photo_downloads_its_thumbnail(result, tmp_path, no_cover_network):
+    client = _DownloadClient()
+    out = write_result(client, _Photo(), result, str(tmp_path))
+    assert client.calls == [("photo", "https://cdn.example.com/pic.jpg")]
+    assert (out / "DXOCAyzEX8i.jpg").exists()
+
+
+def test_unknown_carousel_item_is_loud_not_silently_dropped(result, tmp_path, no_cover_network):
+    class Weird:
+        pk = "x"
+        media_type = 8
+        thumbnail_url = None
+        resources = [_Resource("r1", 99)]
+
+    with pytest.raises(ValueError, match="media_type"):
+        write_result(_DownloadClient(), Weird(), result, str(tmp_path))
+
+
+def test_unsupported_top_level_media_writes_files_without_download(result, tmp_path, no_cover_network):
+    class Story:
+        pk = "x"
+        media_type = 7  # not image/video/album
+        thumbnail_url = None
+
+    out = write_result(_DownloadClient(), Story(), result, str(tmp_path))
+    assert (out / "post.md").exists()
+    assert "_No media files._" in (out / "post.md").read_text(encoding="utf-8")
 
 
 def test_metadata_roundtrips_through_json(result: ScrapeResult) -> None:

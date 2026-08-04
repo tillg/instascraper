@@ -46,11 +46,13 @@ Cross-cutting decisions, each of which spans several files:
   `media_info` falls back to *web* GraphQL, the very path that doesn't work; it
   answers `200` with a ~600KB HTML login wall, so a plain `MediaNotFound` — or a
   dead session — comes back as an opaque `ClientJSONDecodeError` and gets
-  misclassified as a transient skip. `scraper.scrape` uses `media_info_v1` so the
-  real error reaches `cli.main`. (Not yet cleaned up: `writer.write_result` calls
-  `client.album_download` / `photo_download`, which reach the same fallback
-  internally — `photo_download` even tries web GraphQL *first*. `video_download`
-  is already private-only.)
+  misclassified as a transient skip. So: `scraper.scrape` fetches metadata with
+  `media_info_v1`, and `writer._download_media` downloads via
+  `photo_download_by_url` / `video_download_by_url` using the URLs already on the
+  `media` object — **never** `album_download` / `photo_download` /
+  `video_download`, which each re-fetch metadata through `media_info`
+  (`photo_download` tries web GraphQL *first*). Both test suites booby-trap the
+  banned helpers so this can't silently regress.
 - **`models.py` is the contract.** `ScrapeResult` / `Comment` / `Provenance`
   decouple `scraper.py` (fetch only — produces them) from `writer.py` (downloads
   media + renders `post.md`/`metadata.json`). `scraper` never downloads media;

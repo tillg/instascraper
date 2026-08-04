@@ -105,9 +105,16 @@ sequenceDiagram
   each extra page costs `humanizer.delay("page")` and may be the last
   (`should_stop_early()`), and `0` is clamped to `scan_depth_clamp` (200) — paging
   every comment is one of the loudest bot signals there is.
-- **Media**: `album/video/photo_download` writes all items into the shortcode
-  folder; files renamed `<shortcode>[_n].<ext>`; a cover image is fetched for
-  videos. `post.md` embeds images and links videos.
+- **Media**: `writer._download_media` writes all items into the shortcode folder
+  from the URLs already on the `media` object (`*_download_by_url`), so no
+  metadata is re-fetched; files renamed `<shortcode>[_n].<ext>`; a cover image is
+  fetched for videos. `post.md` embeds images and links videos.
+- **Private API only, both stages.** `scrape` uses `media_info_v1` and the writer
+  uses the by-URL download helpers. instagrapi's convenience wrappers
+  (`media_info`, `album_download`, `photo_download`, `video_download`) all fall
+  back to web GraphQL — the path that doesn't work against current Instagram —
+  which answers `200` with an HTML login wall and turns `MediaNotFound` or
+  `LoginRequired` into an opaque `ClientJSONDecodeError`.
 
 ## Pacing (behavior.py)
 

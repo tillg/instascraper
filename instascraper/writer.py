@@ -148,11 +148,48 @@ def _download_cover(url, dest: Path) -> bool:
         return False
 
 
+def _download_media(client, media, out_dir: Path) -> list[Path]:
+    """Download every item of `media` into `out_dir`, in carousel order.
+
+    Uses instagrapi's `*_download_by_url` helpers with the URLs from the `media`
+    object we already hold, rather than `album_download` / `photo_download` /
+    `video_download`. Those re-fetch metadata through `media_info`, which falls
+    back to web GraphQL — dead against current Instagram, answering 200 with a
+    ~600KB HTML login wall (`photo_download` tries it *first*). Going by URL
+    avoids both the redundant round-trip and that failure mode. See CLAUDE.md.
+    """
+    if media.media_type == 8:  # album / carousel
+        items = list(media.resources)
+    elif media.media_type in (1, 2):  # photo, video / reel
+        items = [media]
+    else:
+        return []
+
+    paths: list[Path] = []
+    for i, item in enumerate(items, start=1):
+        # `_rename_media` gives these their final <shortcode>[_n] names; this
+        # stem only has to be unique within the folder.
+        stem = f"{media.pk}_{i}"
+        if item.media_type == 2:
+            paths.append(Path(client.video_download_by_url(str(item.video_url), stem, out_dir)))
+        elif item.media_type == 1:
+            paths.append(Path(client.photo_download_by_url(str(item.thumbnail_url), stem, out_dir)))
+        else:
+            # Loud, not a silently short carousel: a missing item would leave
+            # post.md quietly claiming fewer images than the post has.
+            raise ValueError(
+                f"Cannot download item {i} of {media.pk}: unsupported "
+                f"media_type={getattr(item, 'media_type', None)!r}"
+            )
+    return paths
+
+
 def write_result(client, media, result: ScrapeResult, output_base: str, progress=None) -> Path:
     """Download all media for `media`, then write `post.md` + `metadata.json`.
 
-    instagrapi downloads every media item — single image, reel video, or every
-    carousel/album item — into `output_base/<shortcode>/`. For videos we also
+    Every media item — single image, reel video, or every carousel/album item —
+    is downloaded into `output_base/<shortcode>/` from the URLs already carried by
+    `media` (see `_download_media`; no metadata is re-fetched). For videos we also
     fetch the cover image so the Markdown has a visual preview.
     `progress` is an optional sink with a stage() method.
     """
@@ -160,19 +197,11 @@ def write_result(client, media, result: ScrapeResult, output_base: str, progress
     out_dir = Path(output_base) / result.shortcode
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    pk = media.pk
     kind = {1: "image", 2: "video", 8: "album"}.get(media.media_type, "media")
     progress.start(f"downloading {kind}")
-    if media.media_type == 8:  # album / carousel
-        downloaded = list(client.album_download(pk, folder=out_dir))
-    elif media.media_type == 2:  # video / reel
-        downloaded = [client.video_download(pk, folder=out_dir)]
-    elif media.media_type == 1:  # photo
-        downloaded = [client.photo_download(pk, folder=out_dir)]
-    else:
-        downloaded = []
+    downloaded = _download_media(client, media, out_dir)
 
-    media_files = _rename_media([Path(p) for p in downloaded], out_dir, result.shortcode)
+    media_files = _rename_media(downloaded, out_dir, result.shortcode)
 
     # Cover image for a single video (Markdown can't inline-play video).
     if media.media_type == 2 and getattr(media, "thumbnail_url", None):
