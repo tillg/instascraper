@@ -42,6 +42,15 @@ Cross-cutting decisions, each of which spans several files:
 - **Backend is instagrapi (private mobile API), not instaloader.** Instaloader's
   web-GraphQL post fetch returns empty against current Instagram, so all
   fetching and media download go through an `instagrapi.Client`.
+  **Corollary — call `media_info_v1`, never `media_info`.** instagrapi's
+  `media_info` falls back to *web* GraphQL, the very path that doesn't work; it
+  answers `200` with a ~600KB HTML login wall, so a plain `MediaNotFound` — or a
+  dead session — comes back as an opaque `ClientJSONDecodeError` and gets
+  misclassified as a transient skip. `scraper.scrape` uses `media_info_v1` so the
+  real error reaches `cli.main`. (Not yet cleaned up: `writer.write_result` calls
+  `client.album_download` / `photo_download`, which reach the same fallback
+  internally — `photo_download` even tries web GraphQL *first*. `video_download`
+  is already private-only.)
 - **`models.py` is the contract.** `ScrapeResult` / `Comment` / `Provenance`
   decouple `scraper.py` (fetch only — produces them) from `writer.py` (downloads
   media + renders `post.md`/`metadata.json`). `scraper` never downloads media;

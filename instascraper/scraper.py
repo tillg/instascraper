@@ -137,7 +137,14 @@ def scrape(
 
     progress.start("fetching metadata")
     pk = client.media_pk_from_url(source_url)  # local: decodes the shortcode
-    media = client.media_info(pk)
+    # `media_info_v1`, not `media_info`: the latter falls back to web GraphQL,
+    # which is dead against current Instagram (the same reason the backend is
+    # instagrapi and not instaloader). That fallback answered 200 with a ~600KB
+    # HTML login wall, so any private-API failure — including a dead session —
+    # surfaced as an opaque ClientJSONDecodeError and got skipped as transient.
+    # Going straight to the private API lets MediaNotFound / LoginRequired reach
+    # `cli.main`, which already classifies them correctly.
+    media = client.media_info_v1(pk)
     if humanizer is not None:
         humanizer.record("request")
     progress.ok(f"{_typename(media)} by @{getattr(media.user, 'username', '?')} · "

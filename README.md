@@ -245,7 +245,10 @@ meta = render_metadata(result, media_files=[])
   (the default `NullProgress`).
 - **Errors** — `instagrapi` exceptions propagate (`MediaNotFound`,
   `LoginRequired`, `PleaseWaitFewMinutes`, …); `parse_shortcode` raises
-  `ValueError`. Catch these to classify retry vs. skip vs. fatal.
+  `ValueError`. Catch these to classify retry vs. skip vs. fatal. `scrape` fetches
+  metadata with `media_info_v1` (private API) rather than `media_info`, so you get
+  the real error instead of the `ClientJSONDecodeError` that instagrapi's dead
+  web-GraphQL fallback produces.
 - **Pacing** — the library path is **unhumanized by default**: pass no
   `humanizer` and you get today's behavior (`delay_range = [1, 3]`, exhaustive
   comment paging, no rate ceilings). To pace like the CLI does, build one and

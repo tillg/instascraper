@@ -3,6 +3,7 @@
 import random
 from datetime import datetime, timezone
 
+import instagrapi.exceptions as igex
 import pytest
 
 import instascraper.scraper as scraper
@@ -49,12 +50,20 @@ def _patch_extract(monkeypatch):
     )
 
 
+def _no_web_fallback(self, pk):
+    """`media_info` falls back to web GraphQL, which no longer works — using it
+    turns a clear private-API error into a 600KB HTML dump. Fakes reject it."""
+    raise AssertionError("scrape must call media_info_v1, not media_info")
+
+
 class _FakeClient:
     def media_pk_from_url(self, url):
         return _Media.pk
 
-    def media_info(self, pk):
+    def media_info_v1(self, pk):
         return _Media()
+
+    media_info = _no_web_fallback
 
     def media_id(self, pk):
         return pk
@@ -80,6 +89,39 @@ def test_scrape_maps_media_and_ranks_comments():
     assert [c.username for c in result.comments] == ["alice", "bob"]  # ranked by likes
     assert result.provenance.backend.startswith("instagrapi ")
     assert media is not None
+
+
+def test_private_api_error_surfaces_instead_of_the_web_fallback():
+    """A failing metadata fetch must raise the real private-API error.
+
+    Regression: `client.media_info` tries the private API and then falls back to
+    web GraphQL, which is dead against current Instagram. The fallback returned a
+    200 with a ~600KB HTML login wall, so a plain "media not found" surfaced as
+    `ClientJSONDecodeError` — and, worse, a dead session surfaced as a transient
+    skip instead of the fatal it is.
+    """
+    class C(_FakeClient):
+        def media_info_v1(self, pk):
+            raise igex.MediaNotFound("Media not found")
+
+    with pytest.raises(igex.MediaNotFound):
+        scrape(
+            C(), "DXSzphPjtSm",
+            "https://www.instagram.com/reel/DXSzphPjtSm/", account="tillg",
+        )
+
+
+def test_dead_session_stays_fatal_and_is_not_masked():
+    """`LoginRequired` must propagate so cli.main can classify it as fatal."""
+    class C(_FakeClient):
+        def media_info_v1(self, pk):
+            raise igex.LoginRequired("login_required")
+
+    with pytest.raises(igex.LoginRequired):
+        scrape(
+            C(), "DXOCAyzEX8i",
+            "https://www.instagram.com/reel/DXOCAyzEX8i/", account="tillg",
+        )
 
 
 def test_scrape_instagram_sort_preserves_order():
@@ -138,8 +180,10 @@ class _EndlessComments:
     def media_pk_from_url(self, url):
         return _Media.pk
 
-    def media_info(self, pk):
+    def media_info_v1(self, pk):
         return _Media()
+
+    media_info = _no_web_fallback
 
     def private_request(self, path, params=None):
         self.pages += 1
@@ -210,8 +254,10 @@ def test_no_humanizer_still_means_scan_everything():
         def media_pk_from_url(self, url):
             return _Media.pk
 
-        def media_info(self, pk):
+        def media_info_v1(self, pk):
             return _Media()
+
+        media_info = _no_web_fallback
 
         def private_request(self, path, params=None):
             Finite.pages += 1
