@@ -51,7 +51,7 @@ instascrape "https://www.instagram.com/reel/DXOCAyzEX8i/" --username tillg --pas
 
 # Afterwards just pass URLs — username, password and options come from config:
 instascrape "https://www.instagram.com/reel/DZ_KsKvKAW0/"
-instascrape --file SAMPLE_URLS.md --target-dir data --delay 8
+instascrape --file SAMPLE_URLS.md --target-dir data
 ```
 
 Option precedence: **CLI flag > saved config (`.env`) > environment variable >
@@ -71,25 +71,109 @@ instascrape "https://www.instagram.com/reel/DXOCAyzEX8i/" --browser safari
 # Single URL
 instascrape "https://www.instagram.com/reel/DXOCAyzEX8i/"
 
-# Batch every Instagram URL found in a file, into data/, paced:
-instascrape --file SAMPLE_URLS.md --target-dir data --delay 8
+# Batch every Instagram URL found in a file, into data/:
+instascrape --file SAMPLE_URLS.md --target-dir data
 ```
 
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--username NAME` | stored config | Instagram account to log in as (saved) |
 | `--password PW` | stored config | Password — only needed for the first login (saved) |
-| `--target-dir DIR` | `output` | Base directory for the per-post folders (alias: `--output`) |
+| `--target-dir DIR` | stored config, else `output` | Base directory for the per-post folders (alias: `--output`) |
 | `--session-file PATH` | `~/.config/instascraper/session-<user>.json` | Where the session is stored/reused |
 | `--browser NAME` | off | Bootstrap login from a logged-in browser (safari, chrome, …) |
-| `--delay SECONDS` | `3` | Pause between items in batch mode |
+| `--device-profile {android,ios}` | `android` | Device family to emulate when creating a **new** session (see below) |
 | `--comment-sort {likes,instagram}` | `likes` | Ranking rule for the top 10 (see below) |
-| `--comment-scan-limit N` | `200` | Comments to scan before ranking; `0` = all (slow, rate-limit risk) |
+| `--comment-scan-limit N` | `200` | Comments to scan before ranking; `0` = all (clamped under humanization) |
+| `--delay SECONDS` | `3` | Pause between items in batch mode — **only with `--no-humanize`** |
+| `--no-humanize` | off | Turn humanization off (see below) |
 | `--no-save-config` | off | Don't write credentials/options to the config file |
 
-All saved options live in `~/.config/instascraper/.env`. `instascrape -h` shows
-everything. Exit codes: `0` all good · `1` some items skipped · `2` fatal
+All saved options live in `~/.config/instascraper/.env` — `--target-dir`
+included, so once you pass it that directory stays your default for later runs
+(it's `INSTASCRAPE_OUTPUT` in the `.env`; edit or delete the line to go back to
+`output`). The path is resolved **relative to the current working directory**, so
+the same setting writes into a different folder when you run from elsewhere.
+`instascrape -h` shows everything. Exit codes: `0` all good · `1` some items skipped · `2` fatal
 (auth / rate limit — stopped early).
+
+## Humanization
+
+Instagram's automated defenses don't just look at *what* you fetch, they look at
+*how*. A metronomic 1–3 s drip with no idle, thousands of requests to page every
+comment on a post, and a 200-URL batch at 04:00 are all cheap to spot. A live
+capture of the real web client shows the opposite shape: a short burst of
+requests when you open a post, then **4–57 s of nothing** until the next action.
+
+So by default `instascrape` paces itself like a person using the app:
+
+- **Sampled think-time** instead of fixed sleeps — `1–4 s` between API calls,
+  `2–8 s` between comment pages, `20–90 s` between posts, plus a 20% chance of a
+  longer 30–120 s "got distracted" break.
+- **Human-scale comment depth** — each page has a 30% chance of being the last,
+  and `--comment-scan-limit 0` becomes ~200 rather than "page every comment".
+- **Rate ceilings** — 300 requests / 60 posts per session, 200 requests per
+  rolling hour.
+- **Active hours** — 08:00–23:00 local, with jittered edges. Outside them the
+  run ends gracefully (exit `1`) instead of blocking for hours.
+- **Politeness backoff** — a `PleaseWaitFewMinutes` is waited out (60 s, doubling,
+  capped at 15 min, 3 attempts) instead of being immediately fatal.
+
+Every one of these is a `--humanize-*` flag (or `INSTASCRAPE_HUMANIZE_*` in
+`.env`); `instascrape -h` lists them all, and the defaults live in one place,
+`instascraper.behavior.BehaviorProfile`. Each `post.md` records the pacing it
+was fetched with, and how many comments were *actually* scanned.
+
+`--no-humanize` applies **to that run only** and is deliberately *not* saved to
+your config, unlike every other option — humanization staying the default is the
+whole point, and a one-off opt-out silently leaking into later runs would defeat
+it. (A permanent opt-out is possible, but it takes a hand-written
+`INSTASCRAPE_HUMANIZE=false` in the `.env`; `--humanize` overrides that.)
+
+### Prefer one batch over many runs
+
+Rate ceilings, the rolling hourly window, and the between-post idle all live in a
+**single process**. Ten separate `instascrape` invocations back-to-back therefore
+get *no* inter-post pacing at all (there is no "next post" in a one-URL run), ten
+fresh app-open warm-ups, and ten reset counters — a worse signal than not pacing
+at all. Put the URLs in one file and make one run of it:
+
+```bash
+instascrape --file urls.md          # ✅ paced, gated, one warm-up
+for u in $(cat urls.txt); do instascrape "$u"; done   # ❌ don't
+```
+
+```bash
+# Idle 30–120s between posts instead of the default 20–90s:
+instascrape --file urls.md --humanize-post-delay 30,120
+
+# Archive round the clock, no active-hours window:
+instascrape --file urls.md --humanize-active-hours off
+
+# Old fast behavior — fixed --delay, and 0 really means every comment:
+instascrape "<url>" --no-humanize --delay 3 --comment-scan-limit 0
+```
+
+**This lowers, but cannot eliminate, the chance of being flagged.** Account
+history, IP reputation, and device identity matter too, and are only partly in
+this tool's control. Humanized runs are also deliberately *slower*.
+
+### Device identity
+
+Instagram treats a new device as its own signal, independent of pacing — a fresh
+login can trip a new-device alert before any scraping happens. So the emulated
+device is **stable**, not randomized: it's seeded once when a session is created
+and persisted, and a reused session is never re-fingerprinted (changing a live
+session's device is itself a new-device event). If `--device-profile` disagrees
+with the session on disk, the tool says so and keeps the session; switching is a
+deliberate act — delete `session-<user>.json` and log in again, expecting one
+new-device prompt.
+
+`android` is the default because it is the only *coherent* choice: instagrapi
+speaks Instagram's Android private API and sends Android headers
+(`X-IG-Android-ID`, `X-IG-Capabilities`) on every request. `--device-profile ios`
+changes the user-agent only, leaving it contradicting the rest of the envelope —
+it's available, but it warns, and it isn't recommended.
 
 ## Use as a library
 
@@ -139,12 +223,13 @@ meta = render_metadata(result, media_files=[])
 
 | Import | Purpose |
 |--------|---------|
-| `auth.get_client(username=None, password=None, browser=None, session_file=None, progress=None) -> (Client, account)` | Log in / reuse a persisted session; returns an `instagrapi.Client` and the account name. |
+| `auth.get_client(username=None, password=None, browser=None, session_file=None, progress=None, humanizer=None, device_profile="android") -> (Client, account)` | Log in / reuse a persisted session; returns an `instagrapi.Client` and the account name. |
 | `url.parse_shortcode(url) -> str` | Extract the shortcode from a `/p/`, `/reel/` or `/tv/` URL. Raises `ValueError` if unrecognized. |
-| `scraper.scrape(client, shortcode, source_url, account, sort="likes", scan_limit=200, progress=None) -> (media, ScrapeResult)` | Fetch metadata + ranked comments. No download. |
+| `scraper.scrape(client, shortcode, source_url, account, sort="likes", scan_limit=200, progress=None, humanizer=None) -> (media, ScrapeResult)` | Fetch metadata + ranked comments. No download. |
 | `writer.write_result(client, media, result, output_base, progress=None) -> Path` | Download all media and write `post.md` + `metadata.json`. |
 | `writer.render_markdown(result, media_files) / render_metadata(result, media_files)` | Pure renderers (no I/O / network). |
 | `scraper.select_top_comments(comments, n=10, sort="likes")` | Pure comment-ranking helper. |
+| `behavior.BehaviorProfile`, `behavior.Humanizer`, `behavior.build_profile(opts)` | The pacing policy and the object that applies it. |
 | `models.ScrapeResult`, `models.Comment`, `models.Provenance` | The data carriers. |
 
 ### Notes for integrators
@@ -161,17 +246,33 @@ meta = render_metadata(result, media_files=[])
 - **Errors** — `instagrapi` exceptions propagate (`MediaNotFound`,
   `LoginRequired`, `PleaseWaitFewMinutes`, …); `parse_shortcode` raises
   `ValueError`. Catch these to classify retry vs. skip vs. fatal.
-- **Pacing** — the client uses `delay_range = [1, 3]`, so each request sleeps a
-  random 1–3 s. Expect a single post to take tens of seconds; batch accordingly.
+- **Pacing** — the library path is **unhumanized by default**: pass no
+  `humanizer` and you get today's behavior (`delay_range = [1, 3]`, exhaustive
+  comment paging, no rate ceilings). To pace like the CLI does, build one and
+  hand it to both `get_client` and `scrape`:
+
+  ```python
+  from instascraper.behavior import BehaviorProfile, Humanizer
+
+  humanizer = Humanizer(BehaviorProfile())          # or build_profile(opts)
+  client, account = get_client(username="me", humanizer=humanizer)
+  media, result = scrape(client, shortcode, url, account, humanizer=humanizer)
+  ```
+
+  One `Humanizer` per run — it carries the session counters and the rolling rate
+  window. `Humanizer(profile, rng=…, sleep=…, now=…, wall=…)` takes an injected
+  RNG and clock, so tests stay deterministic and never actually sleep. Either
+  way, expect a single post to take tens of seconds; batch accordingly.
 
 ## About "top 10 comments"
 
 Instagram's in-app "top comments" ranking is algorithmic and **not** exposed;
 `get_comments()` returns latest-first. So "top" here is a *constructed*
-measurement — by default, the 10 comments with the highest like count among the
-first 200 scanned. Every `post.md` states the exact rule it used in its
-provenance header, so the export is honest about what "top" means. Use
-`--comment-sort instagram` for first-returned order instead.
+measurement — the 10 comments with the highest like count among the ones
+actually scanned (up to 200 by default, and often fewer, since humanization
+stops paging early the way a reader would). Every `post.md` states the rule it
+used **and how many comments were really paged**, so the export never overstates
+its depth. Use `--comment-sort instagram` for first-returned order instead.
 
 ## Notes & limitations
 

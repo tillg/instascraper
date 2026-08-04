@@ -56,11 +56,15 @@ class BehaviorProfile:
     long_pause_prob: float = 0.2
     early_stop_prob: float = 0.3               # per-page chance to stop reading (comments are shallow)
     warmup_calls:  Range = Range(0, 2)         # app-open benign calls (drawn via sample_int)
+    scan_depth_clamp: int = 200                # what `--comment-scan-limit 0` becomes (§2b)
     max_requests_per_session: int = 300
     max_posts_per_session: int = 60
     window_seconds: int = 3600                 # rolling window
     max_requests_per_window: int = 200
     active_hours: tuple[int, int] | None = (8, 23)  # local; None = anytime
+    active_hours_jitter: Range = Range(0.0, 30.0)   # minutes; the §4 "edge jitter",
+                                                    # drawn once per run so the
+                                                    # window shifts, not flickers
     backoff_base: float = 60.0
     backoff_max: float = 900.0
     backoff_attempts: int = 3
@@ -70,6 +74,12 @@ class BehaviorProfile:
 Rationale: a reviewer reads one dataclass and knows every way the tool paces
 itself. Defaults are chosen to resemble a person casually browsing, not to be
 maximally fast.
+
+Two fields (`scan_depth_clamp`, `active_hours_jitter`) were added during
+implementation. Both are behaviors this document already specifies in prose —
+the §2b depth clamp and the §4 active-hours edge jitter — and putting them in the
+profile rather than at the call site is what the "no timing constant lives at a
+call site" rule requires. Each gets a `--humanize-*` flag like every other field.
 
 ### 1b. Device-identity continuity (ranks above cadence)
 
@@ -81,9 +91,22 @@ of the sampled delays):
 
 1. **Coherent device family.** This account's history is **iOS app + Safari**,
    but instagrapi defaults to an **Android** device. Expose a `device_profile`
-   option (e.g. `ios` | `android`) that seeds instagrapi's device settings
-   (`set_device` / `set_user_agent`) to an **iOS** profile matching the account's
-   real usage. Persist it in the session so it never drifts between runs.
+   option (`ios` | `android`) that seeds instagrapi's device settings
+   (`set_device` / `set_user_agent`) when a session is minted, and persist it in
+   the session so it never drifts between runs.
+
+   > **Implementation finding (2026-08-03): the default is `android`, not `ios`.**
+   > instagrapi cannot emulate iOS — it speaks the *Android* private API and
+   > sends `X-IG-Android-ID`, `X-IG-Capabilities: 3brTv10=`, and Android
+   > `bloks_versioning_id`/`version_code` unconditionally
+   > (`instagrapi/mixins/private.py:232-240`, `instagrapi/config.py:15-42`). Only
+   > the UA string is ours. An iPhone UA over an Android envelope is *less*
+   > coherent than a plain Android device — the very incoherence `domain.md`
+   > lists as a static flag — so it would have made this measure
+   > counterproductive. `android` (coherent, and what the existing session
+   > already is, so no migration prompt) is the default; `ios` stays available
+   > and warns. Matching the account's real iOS history is simply not reachable
+   > from this backend; it would need a genuinely iOS-shaped client.
 
    **Migration — existing sessions are never silently re-fingerprinted.** A
    persisted session already carries a device family (Android, for anyone who

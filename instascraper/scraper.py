@@ -30,11 +30,15 @@ class NullProgress:
 _NULL = NullProgress()
 
 
-def _scan_comments(client, pk, amount: int, tick) -> list:
+def _scan_comments(client, pk, amount: int, tick, humanizer=None) -> list:
     """Page through a post's comments one request at a time, calling `tick()`
-    once per fetched page. Because instagrapi paces ~1–3s before each request,
-    a dot appears roughly every 1–3s — mirroring the actual fetch cadence.
-    `amount` 0 means scan all. Mirrors instagrapi's own paging."""
+    once per fetched page. Because instagrapi sleeps its `delay_range` before
+    each request, dots appear at the real fetch cadence — a few seconds apart.
+    `amount` 0 means scan all. Mirrors instagrapi's own paging.
+
+    With a `humanizer`, each extra page costs a sampled think-time and may be
+    the last: a person reads a screenful and moves on rather than paging to an
+    exact count. Without one, paging is exhaustive exactly as before."""
     media_id = client.media_id(pk)
     comments: list = []
     params = None
@@ -46,17 +50,25 @@ def _scan_comments(client, pk, amount: int, tick) -> list:
             tick()  # one dot per fetched page (≈ one paced request)
 
     result = client.private_request(f"media/{media_id}/comments/", params)
+    if humanizer is not None:
+        humanizer.record("request")
     collect(result)
     while (result.get("has_more_comments") and result.get("next_max_id")) or (
         result.get("has_more_headload_comments") and result.get("next_min_id")
     ):
+        if humanizer is not None and humanizer.should_stop_early():
+            break  # read enough — a human wouldn't page on
         if result.get("has_more_comments"):
             params = {"max_id": result["next_max_id"]}
         else:
             params = {"min_id": result["next_min_id"]}
         if not (result.get("next_max_id") or result.get("next_min_id") or result.get("comments")):
             break
+        if humanizer is not None:
+            humanizer.delay("page")
         result = client.private_request(f"media/{media_id}/comments/", params)
+        if humanizer is not None:
+            humanizer.record("request")
         collect(result)
         if amount and len(comments) >= amount:
             break
@@ -110,6 +122,7 @@ def scrape(
     sort: str = "likes",
     scan_limit: int = 200,
     progress=None,
+    humanizer=None,
 ) -> tuple[object, ScrapeResult]:
     """Fetch a post/reel via instagrapi and build a `ScrapeResult`.
 
@@ -117,20 +130,33 @@ def scrape(
     (passed to `writer.write_result` for downloading). No media is downloaded
     here. instagrapi exceptions propagate to the caller for classification.
     `progress` is an optional sink with stage()/scan_start()/tick() methods.
+    `humanizer` is an optional `behavior.Humanizer` that paces the comment
+    paging; `None` (the library path) keeps today's exhaustive behavior.
     """
     progress = progress or _NULL
 
     progress.start("fetching metadata")
-    pk = client.media_pk_from_url(source_url)
+    pk = client.media_pk_from_url(source_url)  # local: decodes the shortcode
     media = client.media_info(pk)
+    if humanizer is not None:
+        humanizer.record("request")
     progress.ok(f"{_typename(media)} by @{getattr(media.user, 'username', '?')} · "
                 f"{media.comment_count} comments · ❤️ {media.like_count}")
 
     amount = scan_limit if scan_limit and scan_limit > 0 else 0  # 0 == all
+    if humanizer is not None:
+        # Paging every comment of a post is one of the loudest bot signals
+        # there is, so `0` (= all) becomes a human-scale depth under humanization.
+        amount = humanizer.clamp_scan_limit(amount)
+        if scan_limit <= 0 < amount:
+            progress.stage(
+                f"humanized: scanning ~{amount} comments, not all "
+                "(pass --no-humanize to scan everything)"
+            )
     progress.start(
         f"scanning {'all' if amount == 0 else f'up to {amount}'} comments (1 dot/page)"
     )
-    raw_comments = _scan_comments(client, pk, amount, progress.tick)
+    raw_comments = _scan_comments(client, pk, amount, progress.tick, humanizer)
     progress.ok(f"{len(raw_comments)} comments → top 10 by {sort}")
     top = select_top_comments([_to_comment(c) for c in raw_comments], n=10, sort=sort)
 
@@ -140,6 +166,8 @@ def scrape(
         account=account,
         comment_sort=sort,
         comment_scan_limit=scan_limit,
+        comments_scanned=len(raw_comments),
+        humanization=humanizer.profile.summary() if humanizer is not None else "off",
     )
 
     result = ScrapeResult(

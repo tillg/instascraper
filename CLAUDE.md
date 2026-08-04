@@ -33,7 +33,8 @@ top-10 comments + provenance). One module per stage; `cli.py` orchestrates a
 per-URL pipeline:
 
 ```
-cli.main → auth.get_client → (per URL) url.parse_shortcode → scraper.scrape → writer.write_result
+cli.main → behavior.build_profile → auth.get_client
+        → (per URL) url.parse_shortcode → scraper.scrape → writer.write_result
 ```
 
 Cross-cutting decisions, each of which spans several files:
@@ -57,15 +58,41 @@ Cross-cutting decisions, each of which spans several files:
   challenge prompted interactively). On re-login it **keeps the same device
   UUIDs** so Instagram doesn't see a "new device" each run. Session lives at
   `~/.config/instascraper/session-<user>.json`.
+- **`behavior.py` owns all pacing; no call site holds a timing constant.**
+  `BehaviorProfile` is a frozen dataclass of sampled `Range`s and ceilings — the
+  single source of default truth. `Humanizer` applies it (think-time, early
+  comment give-up, rate gating, backoff, warm-up) with an **injected RNG, sleep,
+  and clock**, which is what keeps the suite deterministic *and sleep-free*.
+  Humanization is **on by default**; `humanizer=None` is the library path and
+  reproduces the pre-humanization behavior exactly. Defaults are calibrated
+  against `specs/system/observations-web-cadence.md`.
+- **Identity is stable, behavior is varied — they pull opposite ways on purpose.**
+  Everything in `BehaviorProfile` is *sampled*; `device_profile` and the session
+  UUIDs are *fixed*. `_apply_device` runs **only when minting a new session**: a
+  reused session is authoritative, because re-fingerprinting a live session is
+  itself the new-device event we're avoiding. `android` is the default —
+  instagrapi sends Android headers regardless of the UA, so `ios` is UA-only and
+  warns.
 - **"Top 10 comments" is a constructed ranking, not Instagram's.**
   `select_top_comments(sort="likes")` = the 10 highest `like_count` among the
-  first `--comment-scan-limit` scanned (`0` = all). `sort="instagram"` =
-  first-returned order. The rule and scan depth are recorded in every `post.md`
-  via `Provenance`.
+  comments **actually scanned**. `sort="instagram"` = first-returned order. The
+  rule, the configured limit, and `comments_scanned` (which differs, since
+  early-stop and the `scan_depth_clamp` on `0` cut paging short) all go into
+  `Provenance` — provenance must never overstate depth.
 - **Error handling drives exit codes** (the `cli.main` loop): not-found / private
-  → skip that URL; `LoginRequired` / `ChallengeRequired` / `PleaseWaitFewMinutes`
-  → fatal, stop the batch; any other exception → skip & continue. Exit `0` = all
-  good, `1` = some skipped, `2` = fatal.
+  → skip that URL; `PleaseWaitFewMinutes` → jittered backoff and retry, fatal only
+  once attempts are spent; `LoginRequired` / `ChallengeRequired` → fatal, stop the
+  batch; any other exception → skip & continue. A rate ceiling or the active-hours
+  window → *graceful* stop. Exit `0` = all good, `1` = some skipped or a graceful
+  stop, `2` = fatal.
+- **Two options are deliberately never persisted** (`cli._NEVER_SAVED`), unlike
+  every other: `--no-humanize` applies per run only. Humanization being the
+  default is the point of the feature, so a one-off opt-out must not leak into
+  later runs. `--humanize` overrides a hand-written `INSTASCRAPE_HUMANIZE=false`.
+- **Pacing state is per process.** Ceilings, the rolling window, and inter-post
+  idle live in the one `Humanizer` a run builds, so *N* invocations don't share a
+  budget and a one-URL run gets no idle at all. Batch with `--file`; see
+  `specs/changes/cross-session-humanization/` for the proposed fix.
 - **Progress UI:** `cli.Progress` prints "announce… → complete on the same line",
   with one dot per fetched comment page. `scraper.NullProgress` is the no-op sink
   used by library callers and tests.
@@ -75,7 +102,9 @@ Cross-cutting decisions, each of which spans several files:
 The repo keeps a living spec under `specs/`, operated on by the `/spec:*` skills:
 
 - `specs/system/` — the current system: `domain.md` (vocabulary),
-  `architecture.md` (modules + flows), `functional.md` (user-facing behavior).
+  `architecture.md` (modules + flows), `functional.md` (user-facing behavior),
+  `observations-web-cadence.md` (the dated live capture the pacing defaults are
+  calibrated against — field evidence, not policy).
 - `specs/changes/<name>/` — a proposed change: `proposal.md`, `domain.md`,
   `architecture.md`, `plan.md`, and optionally `observations.md`.
 

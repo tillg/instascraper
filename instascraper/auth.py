@@ -27,12 +27,30 @@ INSTAGRAM_BASE = "https://www.instagram.com"
 SUPPORTED_BROWSERS = ("safari", "chrome", "brave", "edge", "firefox", "chromium", "opera", "vivaldi")
 
 # Client-app-like pacing: instagrapi sleeps a random N seconds between private
-# API calls, so a single post's requests don't look like a burst.
+# API calls, so a single post's requests don't look like a burst. Used only when
+# humanization is off; otherwise it comes from `BehaviorProfile.request_delay`.
 DELAY_RANGE = [1, 3]
 
 # Per-request timeout (seconds). instagrapi defaults to 1s, which is far too
 # short for CDN media downloads — they time out and the post fails.
 REQUEST_TIMEOUT = 15
+
+DEVICE_PROFILES = ("android", "ios")
+
+# An iPhone-flavoured device + user-agent. See `_apply_device` for why this is
+# not the default: instagrapi's request envelope stays Android regardless.
+IOS_DEVICE = {
+    "manufacturer": "Apple",
+    "model": "iPhone15,3",
+    "device": "iPhone",
+    "cpu": "arm64",
+    "dpi": "460dpi",
+    "resolution": "1290x2796",
+}
+IOS_USER_AGENT = (
+    "Instagram 208.0.0.32.135 (iPhone15,3; iOS 17_5_1; en_US; en-US; "
+    "scale=3.00; 1290x2796; 314665256) AppleWebKit/605.1.15"
+)
 
 
 def make_links_clickable(message: str) -> str:
@@ -48,12 +66,53 @@ def _challenge_code_handler(username: str, choice) -> str:
     ).strip()
 
 
-def _build_client() -> Client:
+def _build_client(delay_range: list | None = None) -> Client:
     client = Client()
-    client.delay_range = DELAY_RANGE
+    client.delay_range = list(delay_range or DELAY_RANGE)
     client.request_timeout = REQUEST_TIMEOUT
     client.challenge_code_handler = _challenge_code_handler
     return client
+
+
+def _delay_range(humanizer) -> list:
+    """Per-request pacing, single-sourced from the behavior profile.
+
+    instagrapi already sleeps `delay_range` before each private call, so we set
+    it from the profile rather than wrapping a second sleep around every call.
+    """
+    if humanizer is None or not humanizer.profile.enabled:
+        return DELAY_RANGE
+    band = humanizer.profile.request_delay
+    return [band.lo, band.hi]
+
+
+def device_family(settings: dict) -> str:
+    """Which device family a persisted session was fingerprinted as."""
+    agent = settings.get("user_agent") or ""
+    return "ios" if ("iOS" in agent or "iPhone" in agent) else "android"
+
+
+def _apply_device(client: Client, device_profile: str, progress) -> None:
+    """Seed the emulated device. Only ever called when minting a NEW session.
+
+    Changing the device of a live session is itself a new-device event — the
+    exact harm this is meant to avoid — so a reused session keeps whatever it
+    already has (see `get_client`).
+    """
+    if device_profile == "ios":
+        # Honest warning: instagrapi speaks the Android private API. It sends
+        # X-IG-Android-ID and X-IG-Capabilities: 3brTv10= on every request
+        # (instagrapi/mixins/private.py), so an iPhone user-agent contradicts
+        # the rest of the envelope. "android" is the coherent choice.
+        progress.stage(
+            "note: --device-profile ios changes the user-agent only — instagrapi's "
+            "request envelope (X-IG-Android-ID, X-IG-Capabilities) stays Android, "
+            "so the fingerprint is mixed. 'android' is the coherent choice."
+        )
+        client.set_device(IOS_DEVICE)
+        client.set_user_agent(IOS_USER_AGENT)  # after set_device, which rebuilds the UA
+    else:
+        client.set_device()  # instagrapi's coherent Android default
 
 
 def _settings_path(username: str | None, session_file: str | None) -> Path:
@@ -131,17 +190,26 @@ def get_client(
     username: str | None = None,
     password: str | None = None,
     progress=None,
+    humanizer=None,
+    device_profile: str = "android",
 ) -> tuple[Client, str]:
     """Return a logged-in instagrapi Client and the account name.
 
     1. Reuse a persisted session (no login call — works in non-interactive runs).
     2. `--browser`: one-shot bootstrap from a logged-in browser session.
     3. Password login (durable); persists the session for future reuse.
+
+    A fresh `Client.login` is a flag-risk event, so it only ever happens when
+    there is no usable session — never speculatively. `device_profile` seeds the
+    emulated device when minting a new session and is deliberately *not* applied
+    to a reused one. `humanizer`, when given, supplies per-request pacing and an
+    optional app-open warm-up.
     """
     progress = progress or NullProgress()
     username = username or os.environ.get("IG_USERNAME")
     spath = _settings_path(username, session_file)
-    client = _build_client()
+    delay_range = _delay_range(humanizer)
+    client = _build_client(delay_range)
     saved_uuids = None
 
     # 1. Reuse a persisted session, validated cheaply. No password needed.
@@ -149,18 +217,32 @@ def get_client(
         try:
             client.load_settings(str(spath))
             client.request_timeout = REQUEST_TIMEOUT  # load_settings resets it to 1s
+            client.delay_range = list(delay_range)    # …and the pacing with it
+            # The session is authoritative about the device: re-fingerprinting a
+            # live session is itself the new-device event we're avoiding.
+            existing = device_family(client.get_settings())
+            if existing != device_profile:
+                progress.stage(
+                    f"session uses {existing!r}; config requests {device_profile!r}; "
+                    f"keeping the existing session. To switch, delete {spath} and "
+                    "log in again (expect a one-time new-device prompt — confirm "
+                    "it was you)."
+                )
             client.get_timeline_feed()  # raises if the session is dead
+            if humanizer is not None:
+                humanizer.warmup(client)
             return client, client.username or username or "unknown"
         except Exception:
             try:
                 saved_uuids = client.get_settings().get("uuids") or None
             except Exception:
                 saved_uuids = None
-            client = _build_client()  # reset; re-auth below (keeping uuids)
+            client = _build_client(delay_range)  # reset; re-auth below (keeping uuids)
 
     # 2. Optional browser bootstrap.
     if browser:
         sessionid = _sessionid_from_browser(browser)
+        _apply_device(client, device_profile, progress)
         try:
             client.login_by_sessionid(sessionid)
         except Exception as exc:
@@ -171,6 +253,8 @@ def get_client(
                 "(run without --browser)."
             ) from exc
         _dump(client, spath)
+        if humanizer is not None:
+            humanizer.warmup(client)
         return client, client.username
 
     # 3. Durable password login (keeps device UUIDs stable across relogins).
@@ -179,8 +263,11 @@ def get_client(
             "No Instagram username. Set IG_USERNAME or pass --username "
             "(or use --browser to import a logged-in browser session)."
         )
+    # UUIDs first: `set_device` seeds its app-version pick from settings["uuids"],
+    # so restoring them keeps the app version stable across re-logins too.
     if saved_uuids:
         client.set_uuids(saved_uuids)
+    _apply_device(client, device_profile, progress)
     password = password or os.environ.get("IG_PASSWORD")
     if not password:
         progress.done()  # close the "logging in…" line before prompting
@@ -193,4 +280,6 @@ def get_client(
         raise SystemExit(f"Login failed: {make_links_clickable(exc)}") from exc
 
     _dump(client, spath)
+    if humanizer is not None:
+        humanizer.warmup(client)
     return client, client.username

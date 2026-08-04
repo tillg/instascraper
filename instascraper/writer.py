@@ -34,9 +34,13 @@ def _caveat(prov: Provenance, n_comments: int) -> str:
             f"Comment ranking: first {n_comments} returned by Instagram "
             '(latest-first) — not the app\'s "top comments".'
         )
-    scanned = "all scanned" if prov.comment_scan_limit == 0 else f"first {prov.comment_scan_limit} scanned"
+    # State what was *actually* paged: the humanized depth clamp and early-stop
+    # make the real count differ from the configured limit, and the top-N is
+    # ranked over that real set.
+    limit = "no limit" if prov.comment_scan_limit == 0 else f"limit {prov.comment_scan_limit}"
     return (
-        f"Comment ranking: top {n_comments} by like_count among {scanned} — "
+        f"Comment ranking: top {n_comments} by like_count among "
+        f"{prov.comments_scanned} comments scanned ({limit}) — "
         'a constructed ranking, not Instagram\'s in-app "top comments".'
     )
 
@@ -60,6 +64,7 @@ def render_markdown(result: ScrapeResult, media_files: list[str]) -> str:
             f"{prov.backend} · as @{prov.account}"
         )
         lines.append(f"> {_caveat(prov, len(result.comments))}")
+        lines.append(f"> Pacing: humanization {prov.humanization}")
     lines.append("")
 
     # Caption.

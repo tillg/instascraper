@@ -29,7 +29,12 @@ class Provenance:
     backend: str     # fetch backend + version, e.g. "instagrapi 2.16.26"
     account: str
     comment_sort: str          # "likes" | "instagram"
-    comment_scan_limit: int    # 0 == scanned all
+    comment_scan_limit: int    # the configured cap; 0 == "scan all"
+    # What was *actually* paged. Early-stop and the humanized depth clamp make
+    # this differ from the configured limit, and the top-10 is ranked over this
+    # set — so provenance must state it rather than overstate the depth.
+    comments_scanned: int = 0
+    humanization: str = "off"  # BehaviorProfile.summary() — how the run was paced
     tool: str = "instascraper"
 
 

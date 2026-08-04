@@ -35,6 +35,8 @@ def result() -> ScrapeResult:
             account="your_account",
             comment_sort="likes",
             comment_scan_limit=200,
+            comments_scanned=137,
+            humanization="on · post 20–90s · early-stop p=0.3",
         ),
     )
 
@@ -53,6 +55,24 @@ def test_ranking_caveat_present(result: ScrapeResult) -> None:
     md = render_markdown(result, MEDIA)
     assert "Comment ranking:" in md
     assert 'not Instagram\'s in-app "top comments"' in md
+
+
+def test_caveat_states_what_was_actually_scanned_not_the_limit(result: ScrapeResult) -> None:
+    # Early-stop / the depth clamp make these differ; don't overstate depth.
+    md = render_markdown(result, MEDIA)
+    assert "among 137 comments scanned (limit 200)" in md
+
+
+def test_pacing_line_reports_the_humanization_summary(result: ScrapeResult) -> None:
+    md = render_markdown(result, MEDIA)
+    assert "> Pacing: humanization on · post 20–90s · early-stop p=0.3" in md
+
+
+def test_metadata_carries_scanned_count_and_humanization(result: ScrapeResult) -> None:
+    prov = render_metadata(result, MEDIA)["provenance"]
+    assert prov["comments_scanned"] == 137
+    assert prov["comment_scan_limit"] == 200
+    assert prov["humanization"].startswith("on ·")
 
 
 def test_image_embed_present(result: ScrapeResult) -> None:
@@ -101,6 +121,7 @@ def test_no_media_and_no_comments() -> None:
             account="acct",
             comment_sort="likes",
             comment_scan_limit=0,
+            comments_scanned=0,
         ),
     )
     md = render_markdown(r, [])
@@ -108,7 +129,7 @@ def test_no_media_and_no_comments() -> None:
     assert "_No caption._" in md
     assert "_No media files._" in md
     assert "_No comments returned._" in md
-    assert "all scanned" in md
+    assert "0 comments scanned (no limit)" in md
 
 
 def test_metadata_roundtrips_through_json(result: ScrapeResult) -> None:

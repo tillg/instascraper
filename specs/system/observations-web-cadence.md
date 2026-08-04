@@ -1,5 +1,12 @@
 # Observations: live traffic capture (web client, authenticated)
 
+> **Why this file is in `specs/system/`.** It is the empirical basis for every
+> default in `behavior.BehaviorProfile` and for the device decision in
+> `auth.py` — a one-off, dated field measurement that cannot be re-derived from
+> the code. `architecture.md` ("Pacing") states the conclusions; this keeps the
+> raw evidence. Re-capture periodically and diff against the shipped defaults;
+> Instagram changes its client.
+
 Captured 2026-07-30 by driving `www.instagram.com` in a real Chrome (Playwright
 MCP), logged in as **@tillg**, viewing reel `DXOCAyzEX8i`. Purpose: ground the
 `BehaviorProfile` defaults in what a genuine client actually emits. Raw artifacts
@@ -35,9 +42,19 @@ The timestamp matches our Playwright **Chrome** login exactly. What this proves:
 **device-identity continuity** — log in rarely, keep one stable device, and make
 that device *coherent with how the account is actually used*. The scraper already
 persists a session with stable UUIDs (good), but it emulates **Android** while
-this account lives on **iOS/Safari** — a mismatch worth fixing. See
-`architecture.md` "Device-identity continuity". Behavioral cadence (below) only
-matters *after* you've cleared the device/login gate.
+this account lives on **iOS/Safari** — a mismatch worth fixing. Behavioral
+cadence (below) only matters *after* you've cleared the device/login gate.
+
+> **Resolution (2026-08-03).** The iOS/Android mismatch turned out to be
+> unfixable from this backend, so it was *not* fixed: instagrapi speaks the
+> Android private API and sends `X-IG-Android-ID` / `X-IG-Capabilities:
+> 3brTv10=` on every request regardless of the user-agent
+> (`instagrapi/mixins/private.py:232-240`). An iPhone UA over that envelope is
+> *less* coherent than a plain Android device. So `device_profile` defaults to
+> `android` — coherent and stable — with `ios` available and warning. The
+> durable half of this finding did land: the device is seeded once when a
+> session is minted and a reused session is never re-fingerprinted
+> (`specs/system/architecture.md`, "Authentication & session flow").
 
 ## 1. Request envelope (per GraphQL POST) — the static fingerprint
 
@@ -61,8 +78,9 @@ query id), `fb_dtsg` / `jazoest` / `lsd` tokens, `__spin_t` timestamp, `av`
 **Implication for us:** the tool must present a **coherent** envelope for *its*
 client (mobile). instagrapi already does this (stable device UUIDs, matching
 UA/app-id). The lesson is *coherence and stability*, not copying web headers.
-This is the **device/locale coherence** parameter in the profile — nothing to
-randomize per request; everything here must stay consistent within a session.
+This is **device identity** — deliberately *not* part of `BehaviorProfile`
+(which is all sampled timing), because nothing here may be randomized; it must
+stay consistent within and across sessions.
 
 ## 2. Endpoint mix — not a single call shape
 
@@ -76,8 +94,10 @@ Three distinct shapes were observed in one post view:
 
 **Implication:** a real client interleaves several endpoint families; a scraper
 that only ever hits one `media/{id}/comments/` endpoint in a loop is
-distinguishable. Modeled by the **warm-up** + **action-sequence realism**
-parameters (a few benign, varied calls around the target fetch).
+distinguishable. Partially addressed by **warm-up** (`warmup_calls`) — a few
+benign app-open calls at session start. Full mid-batch interleaving of
+feed/story/reels-tray calls was deliberately left out of scope: lower value for
+the cost, and easy to get wrong.
 
 ## 3. Cadence — burst-then-idle (the headline finding)
 
@@ -110,12 +130,14 @@ Two structural facts:
 - **Bursts are separated by long human idle** — here 4.4 s, then **22 s**, then
   **57 s**. Idle dominates the timeline.
 
-**Implication (this is the crux):** the current scraper emits *serial, single
-requests spaced a uniform 1–3 s with no idle gaps* — the exact inverse of the
-observed shape. The `BehaviorProfile` should therefore model **(a)** small,
-tight bursts per logical action and **(b)** substantially larger, high-variance
-idle between logical actions (posts), not a flat drip. See recalibrated defaults
-in `architecture.md`.
+**Implication (this is the crux):** the pre-humanization scraper emitted *serial,
+single requests spaced a uniform 1–3 s with no idle gaps* — the exact inverse of
+the observed shape. What shipped models **(b)**: substantially larger,
+high-variance idle between logical actions (`post_delay = Range(20, 90)` plus
+`long_pause`), instead of a flat drip. **(a)**, reproducing the tight
+intra-action burst, was *not* attempted — that shape lives inside instagrapi's
+per-endpoint fan-out, which the tool does not control; `request_delay` stays a
+small uniform pause.
 
 ## 4. Comments are lazy + shallow by default
 
@@ -127,9 +149,10 @@ in `architecture.md`.
   scrolling.
 
 **Implication:** a human rarely loads *all* comments; they open the panel maybe,
-read a screen, and stop. This is exactly the **depth jitter / early give-up**
-parameter — and a strong argument against `--comment-scan-limit 0` (page
-everything) as a default under humanization.
+read a screen, and stop. This became `early_stop_prob = 0.3` (a per-page chance
+of being the last) plus the `scan_depth_clamp = 200` treatment of
+`--comment-scan-limit 0`, which under humanization no longer means "page every
+comment".
 
 ## 5. Duplicate/paired requests
 
@@ -140,11 +163,12 @@ faint tell. Not something we need to fake, just noted.
 
 ## Summary → parameters
 
-| Observation | Profile parameter |
-|-------------|-------------------|
-| Burst of ~9 near-parallel calls per action | (kept in one logical fetch; we don't serialize artificially) |
-| 4–57 s idle between actions, high variance | `post_delay` (wide), `long_pause` + `long_pause_prob` |
-| Interleaved endpoint families | `warmup_calls`, action-sequence realism |
-| Comments lazy + read a screenful | `early_stop_prob`, human-scale default scan limit |
-| Stable, coherent envelope | device/locale coherence (stable, **not** randomized) |
-| Per-request pacing exists but is small | `request_delay` (small range, via instagrapi `delay_range`) |
+| Observation | What shipped |
+|-------------|--------------|
+| Burst of ~9 near-parallel calls per action | *not modeled* — lives inside instagrapi's fan-out; out of our control |
+| 4–57 s idle between actions, high variance | `post_delay = Range(20, 90)`, `long_pause = Range(30, 120)` @ `long_pause_prob = 0.2` |
+| Interleaved endpoint families | `warmup_calls = Range(0, 2)` only; mid-batch interleaving out of scope |
+| Comments lazy + read a screenful | `early_stop_prob = 0.3`, `scan_depth_clamp = 200` |
+| Stable, coherent envelope | `device_profile` (stable, **not** randomized); reused sessions never re-fingerprinted |
+| Per-request pacing exists but is small | `request_delay = Range(1, 4)`, applied via instagrapi's own `delay_range` |
+| — (not from this capture) | `max_*_per_session` / `_per_window`, `active_hours`, politeness backoff |
