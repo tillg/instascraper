@@ -121,3 +121,13 @@ The repo keeps a living spec under `specs/`, operated on by the `/spec:*` skills
 
 When landing a user-visible change, update `specs/system/*` and `README.md`
 alongside the code, citing `file:line` the way the existing specs do.
+
+Project-local skills in `.claude/skills/` complement the `/spec:*` ones:
+
+- `/grill-with-docs` — a relentless one-question-at-a-time interview to sharpen a
+  plan, writing the glossary and decisions down as they crystallise. Composes
+  `grilling` (the interview) with `domain-modeling` (the writing).
+- `domain-modeling` — maintains the domain model. **Adapted** from upstream to
+  write into `specs/` instead of a root `CONTEXT.md` + `docs/adr/`; there is no
+  `CONTEXT.md` and no `docs/adr/` in this repo, and none should be created. See
+  `.claude/skills/domain-modeling/UPSTREAM.md` for the provenance and the mapping.
