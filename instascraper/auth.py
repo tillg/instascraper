@@ -1,4 +1,9 @@
-"""Authentication: durable instagrapi session with password login.
+"""Authentication: durable session with password login and a stable device.
+
+The client is `fingerprint.Client`, not `instagrapi.Client` — same API, but its
+headers and CDN fetches don't identify the library. Device identity is this
+module's business (minted once, then never touched); everything else about how a
+request looks is `fingerprint.py`'s.
 
 Primary path (Option B): a real `Client.login(username, password)` registers a
 stable mobile device; we persist the full session with `dump_settings` and reuse
@@ -17,9 +22,9 @@ import os
 import re
 from pathlib import Path
 
-from instagrapi import Client
 from instagrapi.exceptions import TwoFactorRequired
 
+from instascraper.fingerprint import Client
 from instascraper.scraper import NullProgress
 
 DEFAULT_SESSION_DIR = Path.home() / ".config" / "instascraper"

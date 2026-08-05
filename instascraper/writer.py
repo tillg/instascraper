@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import urllib.request
 from dataclasses import asdict
 from pathlib import Path
 
@@ -140,11 +139,19 @@ def _rename_media(paths: list[Path], out_dir: Path, shortcode: str) -> list[str]
     return names
 
 
-def _download_cover(url, dest: Path) -> bool:
+def _download_cover(client, url, dest: Path) -> bool:
+    """Fetch a video's cover through the client, not urllib.
+
+    urllib announces `Python-urllib/3.x` to the CDN moments after the API calls
+    claimed to be the Instagram app from the same IP; the client's CDN session
+    presents the app's own user-agent (see `fingerprint.Client.cdn`). Cosmetic,
+    so a failure here must never fail the post.
+    """
     try:
-        urllib.request.urlretrieve(str(url), str(dest))
+        dest.write_bytes(client.photo_download_by_url_origin(str(url)))
         return True
     except Exception:
+        dest.unlink(missing_ok=True)
         return False
 
 
@@ -206,7 +213,7 @@ def write_result(client, media, result: ScrapeResult, output_base: str, progress
     # Cover image for a single video (Markdown can't inline-play video).
     if media.media_type == 2 and getattr(media, "thumbnail_url", None):
         cover = out_dir / f"{result.shortcode}.jpg"
-        if not cover.exists() and _download_cover(media.thumbnail_url, cover):
+        if not cover.exists() and _download_cover(client, media.thumbnail_url, cover):
             media_files.append(cover.name)
 
     media_files = sorted(set(media_files))

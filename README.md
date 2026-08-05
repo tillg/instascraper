@@ -175,6 +175,39 @@ speaks Instagram's Android private API and sends Android headers
 changes the user-agent only, leaving it contradicting the rest of the envelope —
 it's available, but it warns, and it isn't recommended.
 
+### Request identity
+
+Pacing is only half the picture: *what* a request looks like matters as much as
+*when* it is sent, and no amount of waiting fixes a request that identifies the
+library sending it. So the client is a thin subclass of instagrapi's that cleans
+up its envelope. There is nothing to configure — it is always on:
+
+- **Forged per-user tokens are not sent.** instagrapi fills `IG-U-SHBID`,
+  `IG-U-SHBTS`, `IG-U-RUR` and `IG-U-IG-DIRECT-REGION-HINT` with HMAC blobs
+  hardcoded in the library, captured from someone else's session — sent under
+  *your* account id. Instagram mints these per account, so they are a mismatch on
+  a value that can't be forged. They're dropped; `IG-U-RUR` comes back as soon as
+  Instagram issues a real one.
+- **One telemetry session per run.** Upstream regenerates
+  `X-Pigeon-Session-Id` on *every* request; a real app holds one for as long as
+  it's in the foreground.
+- **The WWW-claim gets echoed.** Instagram answers with `x-ig-set-www-claim` and
+  expects it back; upstream never reads it outside its bloks flow, so every
+  request forever says `X-IG-WWW-Claim: 0`.
+- **A navigation chain that matches the request.** Upstream sends a constant
+  claiming you navigated your own profile and following list, on every request
+  including cold post fetches.
+- **Media downloads look like Instagram.** Upstream fetches media bytes with
+  bare `requests`, announcing `python-requests/x.y` to the CDN seconds after an
+  "Instagram Android" API call from the same IP — the two correlate perfectly.
+  Downloads now carry the app's own user-agent.
+
+What this does *not* fix: instagrapi's device model, app version and bloks hash
+are the same for everyone using the library. Rotating them would be a new-device
+event, which is the thing "Device identity" above exists to avoid — so they stay
+put. If you need to be unrecognisable rather than merely less obvious, a real
+browser session is the stronger tool.
+
 ## Use as a library
 
 `instascrape` is a thin CLI over a small, importable API — you can drive it from

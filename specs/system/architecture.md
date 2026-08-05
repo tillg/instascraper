@@ -23,7 +23,8 @@ flowchart TD
     CLI --> WRITE["writer.py — write_result(), render_markdown/metadata()"]
     AUTH --> BEH
     SCRAPE --> BEH
-    AUTH --> CLIENT[("instagrapi.Client")]
+    AUTH --> FP["fingerprint.py — Client (headers + CDN transport)"]
+    FP --> CLIENT[("instagrapi.Client")]
     AUTH -. "bootstrap" .-> BC["browser_cookie3"]
     SCRAPE --> CLIENT
     WRITE --> CLIENT
@@ -39,6 +40,7 @@ flowchart TD
 | `config.py` | Load/save the `.env` config (credentials + option defaults), chmod 600. |
 | `behavior.py` | `BehaviorProfile` (all pacing policy, pure data) + `Humanizer` (applies it: think-time, early-stop, rate gating, backoff, warm-up) + `build_profile(opts)`. |
 | `auth.py` | `get_client()`: reuse persisted session → else browser import → else password login (2FA/challenge handled); seeds the emulated device for **new** sessions only. |
+| `fingerprint.py` | `Client` — an `instagrapi.Client` subclass that owns what a request *looks like*: drops instagrapi's forged per-user signed tokens, holds one `X-Pigeon-Session-Id` per run, echoes the `WWW-Claim` Instagram issues, and fetches media bytes as the app instead of `python-requests`. |
 | `url.py` | `parse_shortcode()` for `/p/`, `/reel/`, `/tv/` URLs. |
 | `scraper.py` | `scrape()` → fetch metadata + paged comments → `ScrapeResult`; `select_top_comments()` (pure). |
 | `writer.py` | `write_result()` downloads all media + writes files; `render_markdown`/`render_metadata` (pure). |
@@ -169,6 +171,26 @@ flowchart TD
 `<target-dir>/<shortcode>/`: `post.md` (provenance header + caption + embedded
 media + top-10 comments), `metadata.json` (raw fields + `provenance`), and the
 media files. The pure renderers make output testable without network.
+
+## Wire identity (fingerprint.py)
+
+`behavior.py` decides *when* a request is sent; `fingerprint.py` decides *what
+it is*. The split matters because pacing cannot reach any of these: a request
+presenting another account's signed tokens is identifiable however long you
+waited. Four upstream leaks are closed (`fingerprint.py:48-77`):
+
+| Leak | Upstream | Fix |
+|---|---|---|
+| Forged per-user tokens: `IG-U-SHBID`, `IG-U-SHBTS`, `IG-U-RUR`, `IG-U-IG-DIRECT-REGION-HINT` carry HMAC blobs **hardcoded in the library**, sent under *your* user id | `instagrapi/mixins/private.py:262-283` | dropped (`FORGED_HEADERS`); `IG-U-RUR` returns once Instagram issues a real one |
+| `X-IG-Nav-Chain` constant claiming `self_profile → self_following` on every request, including cold media fetches | `mixins/private.py:257` | a deep-link chain matching the request (`NAV_CHAIN`, per-client settable) |
+| `X-Pigeon-Session-Id` rebuilt every request — `base_headers` is a `@property` | `mixins/private.py:213` | one per `Client`, i.e. one per run (`pigeon_session_id`) |
+| `X-IG-WWW-Claim: 0` forever; `x-ig-set-www-claim` is only read in the bloks flow, never in `private_request` | `mixins/bloks.py:697` | `_absorb_www_claim()` on every `private_request`, including failures |
+| Media bytes leave as `python-requests/x.y` with no app headers, seconds after an "Instagram Android" call from the same IP | `mixins/photo.py:121`, `mixins/video.py:105` | `_download_to_path` / `_download_bytes` over `Client.cdn` with the app's user-agent |
+
+Deliberately **not** addressed: the device/app-version/bloks triple in
+`instagrapi/config.py:15-31` is identical for every user of the library, but
+rotating it on a live session is itself the new-device event `auth.py` avoids —
+so it stays device identity's business, minted once and never touched.
 
 ## Cross-cutting
 

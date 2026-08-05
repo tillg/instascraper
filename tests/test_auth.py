@@ -4,10 +4,21 @@ import random
 from pathlib import Path
 
 import pytest
+from instagrapi import Client as UpstreamClient
 
 import instascraper.auth as auth
+import instascraper.fingerprint as fingerprint
 from instascraper.auth import make_links_clickable
 from instascraper.behavior import BehaviorProfile, Humanizer, Range
+
+
+def test_auth_builds_the_fingerprinted_client():
+    # The rest of these tests monkeypatch `auth.Client`, so they pass whichever
+    # class it is. This one pins the wiring that makes fingerprint.py take effect.
+    assert auth.Client is fingerprint.Client
+    assert issubclass(auth.Client, UpstreamClient)
+    client = auth._build_client()
+    assert "IG-U-SHBID" not in client.base_headers
 
 
 def test_relative_checkpoint_url_becomes_absolute():

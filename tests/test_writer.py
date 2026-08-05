@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -195,6 +194,10 @@ class _DownloadClient:
         self.calls.append(("video", url))
         return self._write(url, filename, folder)
 
+    def photo_download_by_url_origin(self, url):
+        self.calls.append(("cover", url))
+        return b"fake-cover"
+
     def album_download(self, *a, **k):
         raise AssertionError("album_download re-fetches metadata via media_info")
 
@@ -205,17 +208,7 @@ class _DownloadClient:
         raise AssertionError("video_download re-fetches metadata")
 
 
-@pytest.fixture
-def no_cover_network(monkeypatch):
-    """Stub the cover fetch at the network boundary (urllib), not in our code."""
-    def fake_urlretrieve(url, dest):
-        Path(dest).write_bytes(b"fake-cover")
-        return dest, None
-
-    monkeypatch.setattr(urllib.request, "urlretrieve", fake_urlretrieve)
-
-
-def test_album_downloads_every_resource_in_carousel_order(result, tmp_path, no_cover_network):
+def test_album_downloads_every_resource_in_carousel_order(result, tmp_path):
     client = _DownloadClient()
     out = write_result(client, _Album(), result, str(tmp_path))
     assert client.calls == [
@@ -228,22 +221,39 @@ def test_album_downloads_every_resource_in_carousel_order(result, tmp_path, no_c
     ]
 
 
-def test_single_video_downloads_by_url_and_still_gets_a_cover(result, tmp_path, no_cover_network):
+def test_single_video_downloads_by_url_and_still_gets_a_cover(result, tmp_path):
     client = _DownloadClient()
     out = write_result(client, _Video(), result, str(tmp_path))
-    assert client.calls == [("video", "https://cdn.example.com/reel.mp4")]
+    # The cover goes through the client too, so it carries the app's identity
+    # instead of urllib's default user-agent (see fingerprint.Client.cdn).
+    assert client.calls == [
+        ("video", "https://cdn.example.com/reel.mp4"),
+        ("cover", "https://cdn.example.com/cover.jpg"),
+    ]
     names = sorted(p.name for p in out.glob("DXOCAyzEX8i.*"))
     assert names == ["DXOCAyzEX8i.jpg", "DXOCAyzEX8i.mp4"]  # video + cover
+    assert (out / "DXOCAyzEX8i.jpg").read_bytes() == b"fake-cover"
 
 
-def test_single_photo_downloads_its_thumbnail(result, tmp_path, no_cover_network):
+def test_a_failed_cover_does_not_fail_the_post(result, tmp_path):
+    class NoCover(_DownloadClient):
+        def photo_download_by_url_origin(self, url):
+            raise RuntimeError("CDN said no")
+
+    out = write_result(NoCover(), _Video(), result, str(tmp_path))
+    assert (out / "DXOCAyzEX8i.mp4").exists()
+    assert not (out / "DXOCAyzEX8i.jpg").exists()
+    assert "DXOCAyzEX8i.mp4" in (out / "post.md").read_text(encoding="utf-8")
+
+
+def test_single_photo_downloads_its_thumbnail(result, tmp_path):
     client = _DownloadClient()
     out = write_result(client, _Photo(), result, str(tmp_path))
     assert client.calls == [("photo", "https://cdn.example.com/pic.jpg")]
     assert (out / "DXOCAyzEX8i.jpg").exists()
 
 
-def test_unknown_carousel_item_is_loud_not_silently_dropped(result, tmp_path, no_cover_network):
+def test_unknown_carousel_item_is_loud_not_silently_dropped(result, tmp_path):
     class Weird:
         pk = "x"
         media_type = 8
@@ -254,7 +264,7 @@ def test_unknown_carousel_item_is_loud_not_silently_dropped(result, tmp_path, no
         write_result(_DownloadClient(), Weird(), result, str(tmp_path))
 
 
-def test_unsupported_top_level_media_writes_files_without_download(result, tmp_path, no_cover_network):
+def test_unsupported_top_level_media_writes_files_without_download(result, tmp_path):
     class Story:
         pk = "x"
         media_type = 7  # not image/video/album
