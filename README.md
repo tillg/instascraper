@@ -21,10 +21,39 @@ output/DXOCAyzEX8i/
 
 ## Install
 
+Requires **Python ≥ 3.10**. Not on PyPI — deliberately, since automated
+collection is against Instagram's Terms and this is a personal-archive tool; the
+install is from git, so the audience stays deliberate.
+
+**Use the CLI** (isolated, on your `PATH`):
+
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .          # installs deps + the `instascrape` command
+pipx install git+https://github.com/tillg/instascraper@v1.0.0
+instascrape "https://www.instagram.com/reel/DXOCAyzEX8i/"
+```
+
+**Use it from another project** — add it as a dependency and pin the tag:
+
+```toml
+# pyproject.toml
+dependencies = ["instascraper @ git+https://github.com/tillg/instascraper@v1.0.0"]
+```
+
+```bash
+pip install "instascraper @ git+https://github.com/tillg/instascraper@v1.0.0"
+```
+
+Either brings `instagrapi` and `browser_cookie3` with it, and installs both the
+`instascrape` command and the importable `instascraper` package (see
+[Use as a library](#use-as-a-library)). Pin a tag rather than `@main`: pacing
+defaults and the ledger schema can change between releases.
+
+**Hack on it:**
+
+```bash
+git clone https://github.com/tillg/instascraper && cd instascraper
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e '.[dev]'   # deps + the `instascrape` command + pytest
 ```
 
 This puts an `instascrape` executable in `.venv/bin/`, so after `activate` you
@@ -302,16 +331,103 @@ meta = render_metadata(result, media_files=[])
 
 ### Public API
 
-| Import | Purpose |
+Everything below is importable and covered by tests. Signatures are exact; there
+is no wildcard re-export, so import from the module (`from instascraper.scraper
+import scrape`).
+
+**`instascraper.url` — URL parsing (pure)**
+
+| Symbol | Purpose |
 |--------|---------|
-| `auth.get_client(username=None, password=None, browser=None, session_file=None, progress=None, humanizer=None, device_profile="android") -> (Client, account)` | Log in / reuse a persisted session; returns an `instagrapi.Client` and the account name. |
-| `url.parse_shortcode(url) -> str` | Extract the shortcode from a `/p/`, `/reel/` or `/tv/` URL. Raises `ValueError` if unrecognized. |
-| `scraper.scrape(client, shortcode, source_url, account, sort="likes", scan_limit=200, progress=None, humanizer=None) -> (media, ScrapeResult)` | Fetch metadata + ranked comments. No download. |
-| `writer.write_result(client, media, result, output_base, progress=None) -> Path` | Download all media and write `post.md` + `metadata.json`. |
-| `writer.render_markdown(result, media_files) / render_metadata(result, media_files)` | Pure renderers (no I/O / network). |
-| `scraper.select_top_comments(comments, n=10, sort="likes")` | Pure comment-ranking helper. |
-| `behavior.BehaviorProfile`, `behavior.Humanizer`, `behavior.build_profile(opts)` | The pacing policy and the object that applies it. |
-| `models.ScrapeResult`, `models.Comment`, `models.Provenance` | The data carriers. |
+| `parse_shortcode(url: str) -> str` | Shortcode from a `/p/`, `/reel/` or `/tv/` URL. Raises `ValueError` if unrecognized. |
+
+**`instascraper.auth` — login & session**
+
+| Symbol | Purpose |
+|--------|---------|
+| `get_client(session_file=None, browser=None, username=None, password=None, progress=None, humanizer=None, device_profile="android") -> (Client, account)` | Reuse a persisted session → else a browser-cookie bootstrap → else password login. Returns a `fingerprint.Client` and the account name. Records the session-validation request and warms up on a cold open when given a `humanizer`. |
+| `device_family(settings: dict) -> str` | `"android"` / `"ios"` for a persisted session's settings. |
+| `make_links_clickable(message: str) -> str` | Absolutize the relative challenge URLs Instagram puts in error strings. |
+| `DEFAULT_SESSION_DIR`, `DELAY_RANGE`, `DEVICE_PROFILES`, `SUPPORTED_BROWSERS`, `REQUEST_TIMEOUT`, `IOS_DEVICE`, `IOS_USER_AGENT` | Defaults and the supported enumerations. |
+
+**`instascraper.scraper` — fetch (network) + ranking (pure)**
+
+| Symbol | Purpose |
+|--------|---------|
+| `scrape(client, shortcode, source_url, account, sort="likes", scan_limit=200, progress=None, humanizer=None) -> (media, ScrapeResult)` | Metadata via `media_info_v1` + paged comments, ranked. Downloads nothing. The `media` object it returns carries the URLs `write_result` needs. |
+| `select_top_comments(comments, n=10, sort="likes") -> list[Comment]` | The ranking rule itself. Pure. |
+| `NullProgress` | The no-op progress sink used when `progress=None`. |
+
+**`instascraper.writer` — download + render**
+
+| Symbol | Purpose |
+|--------|---------|
+| `write_result(client, media, result, output_base, progress=None) -> Path` | Downloads every media item by URL and writes `post.md` + `metadata.json`. Returns the output folder. |
+| `render_markdown(result, media_files: list[str]) -> str` | `post.md` as a string. Pure. |
+| `render_metadata(result, media_files: list[str]) -> dict` | JSON-serializable dict. Pure. |
+| `MEDIA_EXTS`, `IMAGE_EXTS`, `VIDEO_EXTS` | Extension sets used when globbing the output folder. |
+
+**`instascraper.models` — the data contract**
+
+| Symbol | Fields |
+|--------|--------|
+| `ScrapeResult` | `shortcode`, `source_url`, `owner`, `typename`, `taken_at`, `likes`, `is_video`, `caption`, `comments: list[Comment]`, `provenance: Provenance \| None` |
+| `Comment` | `username`, `likes`, `text`, `created_at` |
+| `Provenance` | `fetched_at`, `backend`, `account`, `comment_sort`, `comment_scan_limit`, `comments_scanned`, `humanization`, `tool` |
+
+**`instascraper.behavior` — pacing policy and the object that applies it**
+
+| Symbol | Purpose |
+|--------|---------|
+| `BehaviorProfile(...)` | Frozen dataclass holding *every* pacing parameter — the single source of default truth. `.summary()` renders the provenance line. |
+| `Humanizer(profile=None, rng=None, sleep=time.sleep, now=time.time, wall=datetime.now, ledger=None)` | Applies a profile. RNG and both clocks are injected, which is why the test suite is deterministic and never sleeps. |
+| `Humanizer.delay(kind) -> float` / `.sample_delay(kind) -> float` | Sleep a sampled think-time / sample it without sleeping. `kind ∈ {request, page, post, read_pause, warmup}`. |
+| `Humanizer.gate(kind) -> GateResult` | Verdict before an action: active hours → day → session → rolling window. |
+| `Humanizer.record(kind)` | Count an action. Unconditional — accounting is not pacing — and flushes the ledger after a post. |
+| `Humanizer.owed_idle() -> float` | Seconds still owed before this run's first request (see [cross-session pacing](#pacing-is-continuous-across-runs)). |
+| `Humanizer.is_new_session()` / `.is_cold_open()` | Same sitting? / was the app still open? Two thresholds, one measured gap. |
+| `Humanizer.should_stop_early()`, `.clamp_scan_limit(n)` | Human-scale comment depth. |
+| `Humanizer.can_backoff(attempt)`, `.backoff(attempt)`, `.wait(seconds)` | Politeness backoff and externally-decided waits. |
+| `Humanizer.warmup(client) -> int` | The app-open calls; never fails a run. |
+| `Humanizer.pacing_summary() -> str` | What goes into `Provenance.humanization`, profile + ledger state. |
+| `Range(lo, hi)`, `.sample(rng)`, `.sample_int(rng)` | The sampled band used for every delay. |
+| `GateResult(action, seconds, reason)` and `PROCEED` / `WAIT` / `STOP` | The gate verdict. `WAIT` is only ever the rolling window, so it is bounded. |
+| `build_profile(opts: dict) -> BehaviorProfile` | Build a profile from resolved CLI/`.env`/env options; raises `ValueError` on a malformed value. |
+
+**`instascraper.activity` — cross-session pacing state**
+
+| Symbol | Purpose |
+|--------|---------|
+| `ActivityLedger(path, *, window_seconds, lock_timeout=None, now=time.time, sleep=time.sleep, enabled=True)` | The per-account ledger. Use it as a context manager: `__enter__` locks, loads and prunes; `__exit__` flushes and unlocks. `lock_timeout=None` means `DEFAULT_LOCK_TIMEOUT`. |
+| `.load() -> Activity`, `.flush()`, `.close()`, `.activity`, `.path`, `.lock_path` | Explicit control if you are not using `with`. `flush()` is atomic (temp + `os.replace`, chmod 600). |
+| `Activity` | The persisted document: `version`, `salt`, `last_action`, `session_requests/posts`, `day`, `day_requests/posts`, `window`. `.to_dict()` / `.from_dict(raw)` — the latter never raises. |
+| `activity_path(username, override=None) -> Path` | `activity-<username>.json` under `~/.config/instascraper`, or the override. |
+| `LedgerBusy` | Raised when another run holds the lock. |
+| `LEDGER_VERSION`, `DEFAULT_LOCK_TIMEOUT` | Schema version; the 5 s lock wait. |
+
+**`instascraper.config` — the saved `.env`**
+
+| Symbol | Purpose |
+|--------|---------|
+| `load_config(path=CONFIG_PATH) -> dict[str, str]` / `save_config(updates, path=CONFIG_PATH)` | Read/merge-write the config file (chmod 600). |
+| `ENV_KEYS`, `CONFIG_DIR`, `CONFIG_PATH` | Option-key → env-var mapping, and where things live. |
+
+**`instascraper.fingerprint` — what a request looks like**
+
+| Symbol | Purpose |
+|--------|---------|
+| `Client(...)` | The `instagrapi.Client` subclass `get_client` returns: drops upstream's forged per-user tokens, one Pigeon session id per run, echoes the real `WWW-Claim`, and fetches media as the app. |
+| `photo_download_by_url` / `video_download_by_url` (+ `_origin` variants) | Media fetches over the app-shaped CDN transport. |
+| `FORGED_HEADERS`, `NAV_CHAIN`, `CDN_HEADERS` | The header policy, if you need to inspect or extend it. |
+
+**`instascraper.cli` — the CLI, reusable in pieces**
+
+| Symbol | Purpose |
+|--------|---------|
+| `main(argv=None) -> int` | The whole CLI. Exit codes `EXIT_OK` / `EXIT_PARTIAL` / `EXIT_FATAL` (`0` / `1` / `2`). |
+| `build_parser()`, `resolve_options(args, cfg, environ=None)`, `config_updates(opts)` | Argument parsing and the **CLI > `.env` > env > default** resolution, if you want the same precedence in your own entry point. |
+| `Progress` | The terminal progress sink (`start`/`ok`/`tick`/`stage`/`done`). |
+| `resolve_gate`, `gate_before_login`, `pay_owed_idle`, `pace_between_posts`, `with_backoff` | The pacing choreography around a scrape, should you build your own loop. |
 
 ### Notes for integrators
 
@@ -347,6 +463,33 @@ meta = render_metadata(result, media_files=[])
   window. `Humanizer(profile, rng=…, sleep=…, now=…, wall=…)` takes an injected
   RNG and clock, so tests stay deterministic and never actually sleep. Either
   way, expect a single post to take tens of seconds; batch accordingly.
+- **Cross-session pacing is opt-in for library callers.** Importing the package
+  never touches `~/.config`: with no `ledger=`, a `Humanizer` behaves exactly as
+  it did before the activity ledger existed (owed idle `0`, RNG-drawn
+  active-hours edges, no file, no lock). Only the CLI enables it by default. If
+  your own process runs repeatedly and you want the CLI's continuity — one
+  timeline, shared ceilings, one warm-up — open a ledger around the work:
+
+  ```python
+  from instascraper.activity import ActivityLedger, LedgerBusy, activity_path
+  from instascraper.behavior import BehaviorProfile, Humanizer
+
+  profile = BehaviorProfile()
+  try:
+      with ActivityLedger(activity_path("me"),
+                          window_seconds=profile.window_seconds) as ledger:
+          humanizer = Humanizer(profile, ledger=ledger)
+          humanizer.wait(humanizer.owed_idle())   # pay before the first request
+          client, account = get_client(username="me", humanizer=humanizer)
+          ...
+  except LedgerBusy:
+      ...   # another run holds this account's ledger — a person has one phone
+  ```
+
+  Order matters: `owed_idle()` is paid *before* `get_client`, because the
+  session-validation request inside it is already real traffic. Check
+  `humanizer.gate("request")` first if you want a day ceiling to stop you before
+  spending that request.
 
 ## About "top 10 comments"
 
@@ -381,6 +524,21 @@ its depth. Use `--comment-sort instagram` for first-returned order instead.
 ## Development
 
 ```bash
-pip install -r requirements.txt
-python -m pytest          # network-free unit tests
+pip install -e '.[dev]'                  # deps + pytest
+.venv/bin/python -m pytest -q            # 277 network-free, sleep-free tests
+```
+
+Use the venv interpreter, not a bare `python`: a pyenv shim lacks the deps and
+fails at import. `tests/conftest.py` enforces the suite's invariants — no real
+`~/.config`, no real `time.sleep`, no sockets — so a test that reaches for any of
+them fails loudly rather than quietly touching your account state.
+
+### Releasing
+
+Version lives in two places that a test keeps in sync (`pyproject.toml` and
+`instascraper/__version__`). To cut a release: bump both, run the suite, commit,
+then tag — consumers pin the tag:
+
+```bash
+git tag -a v1.0.0 -m "…" && git push origin main --tags
 ```

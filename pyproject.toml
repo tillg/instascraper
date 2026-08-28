@@ -4,13 +4,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "instascraper"
-version = "0.1.0"
+version = "1.0.0"
 description = "Archive an Instagram post/reel URL to a local folder (media + caption + top 10 comments)."
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = ["instagrapi>=2.16", "browser_cookie3>=0.19"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+
+[project.urls]
+Homepage = "https://github.com/tillg/instascraper"
+Repository = "https://github.com/tillg/instascraper"
+Issues = "https://github.com/tillg/instascraper/issues"
 
 [project.scripts]
 instascrape = "instascraper.cli:main"
