@@ -171,6 +171,7 @@ class _FakeClient:
 
     def login(self, username, password, verification_code=None):
         self.logins += 1
+        self.login_password = password
 
 
 @pytest.fixture
@@ -339,3 +340,38 @@ def test_a_fresh_login_warms_up_whatever_the_gap(fake_client, tmp_path):
     client, _ = _new_session_login(tmp_path, "android", humanizer=hum)
     assert client.logins == 1
     assert client.feed_calls == 2           # the 2 warm-up calls, no validation
+
+
+# --- a login prompt needs a terminal to prompt on -------------------------
+
+
+def test_headless_login_explains_itself_instead_of_crashing(fake_client, tmp_path, monkeypatch):
+    """No session, no password, no TTY — cron and background runs land here."""
+    monkeypatch.setattr(auth.sys.stdin, "isatty", lambda: False, raising=False)
+
+    def unreachable(prompt=""):
+        raise AssertionError("must not prompt when there is no terminal")
+
+    monkeypatch.setattr(auth.getpass, "getpass", unreachable)
+    with pytest.raises(SystemExit) as ei:
+        auth.get_client(
+            session_file=str(tmp_path / "session-tillg.json"),  # no session yet
+            username="tillg",
+            progress=_RecordingProgress(),
+        )
+    message = str(ei.value)
+    assert "no terminal" in message
+    assert "IG_PASSWORD" in message          # the headless way out
+    assert "interactively" in message        # …and the interactive one
+
+
+def test_a_terminal_still_gets_the_password_prompt(fake_client, tmp_path, monkeypatch):
+    monkeypatch.setattr(auth.sys.stdin, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr(auth.getpass, "getpass", lambda prompt="": "typed-in-pw")
+    client, account = auth.get_client(
+        session_file=str(tmp_path / "session-tillg.json"),
+        username="tillg",
+        progress=_RecordingProgress(),
+    )
+    assert client.logins == 1
+    assert client.login_password == "typed-in-pw"

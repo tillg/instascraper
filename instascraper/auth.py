@@ -20,6 +20,7 @@ from __future__ import annotations
 import getpass
 import os
 import re
+import sys
 from pathlib import Path
 
 from instagrapi.exceptions import TwoFactorRequired
@@ -283,6 +284,20 @@ def get_client(
     _apply_device(client, device_profile, progress)
     password = password or os.environ.get("IG_PASSWORD")
     if not password:
+        if not sys.stdin.isatty():
+            progress.done()  # don't leave the message on the "logging in…" line
+            # Cron jobs, pipes, and background runs land here — usually because a
+            # session expired, which is invisible until this point. `getpass`
+            # would fail on the terminal it cannot control and surface as a raw
+            # `termios.error` traceback, so say what happened and what to do.
+            raise SystemExit(
+                f"@{username} needs to log in (no usable session, no password "
+                "given), but there is no terminal to prompt on — stdin is not a "
+                "TTY.\n"
+                "Either run instascrape once interactively to mint a session, or "
+                "set IG_PASSWORD (environment, or the config .env) so headless "
+                "runs can log in by themselves."
+            )
         progress.done()  # close the "logging in…" line before prompting
         password = getpass.getpass(f"Enter Instagram password for @{username}: ")
     try:

@@ -47,6 +47,12 @@ The first run takes your username + password; it then saves a durable session to
 (chmod 600) so you can omit them next time. If Instagram asks for a 2FA /
 security-challenge code (email or SMS), you'll be prompted for it.
 
+Sessions do eventually die, and the next run then needs a password. In a cron job
+or any other run without a terminal there is nothing to prompt on, so the tool
+says so and stops (exit `1`) instead of failing obscurely. For unattended runs,
+set `IG_PASSWORD` in the environment or the config `.env`; otherwise run
+`instascrape` interactively once to mint a fresh session.
+
 ```bash
 # First run — pass credentials once; they're saved for next time:
 instascrape "https://www.instagram.com/reel/DXOCAyzEX8i/" --username tillg --password 'xyz'
