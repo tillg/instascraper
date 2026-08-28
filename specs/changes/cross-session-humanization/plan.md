@@ -288,8 +288,22 @@
       did, once: the first `main()`-level run wrote a real `activity.json`. The
       same `conftest` now redirects `CONFIG_DIR` / `CONFIG_PATH` /
       `DEFAULT_SESSION_DIR` per module into `tmp_path`.)*
-- [ ] Manual smoke: two sequential single-URL runs on an **own** post — the second
+- [x] Manual smoke: two sequential single-URL runs on an **own** post — the second
       should announce an owed idle *before* it logs in, and skip warm-up. Inspect
       `activity-<account>.json` after each: `last_action`, the session counters, and
       the day counters should all have advanced, and the second run's counters
       should continue the first's rather than restart.
+
+      **Done live on 2026-08-28, 17:53–18:27 CEST, at eleven runs rather than two**
+      (`SAMPLE_URLS.md`, one invocation per URL, defaults throughout). All eleven
+      exited `0`. Nine of the ten follow-up runs announced an owed idle *before*
+      the login line — 25, 123, 34, 85, 33, 29, 79, 53, 46 s — and the tenth
+      correctly owed nothing, its gap (113 s) already exceeding the sampled pace.
+      One draw (123 s) exceeded `post_delay.hi`, so the long-pause tail reached
+      the multi-invocation path in the wild, which sampling bare `post_delay`
+      could never do. Counters climbed monotonically — posts 1 → 11, requests
+      2 → 43, one activity session, one day — and no run was a cold open (inter-run
+      gaps 1–11 s against `foreground_idle` 300 s), so warm-up fired once for the
+      whole series, at the interactive login. The salt stayed fixed, so the
+      active-hours edges were stable across all eleven. Per-post cost under
+      humanization: 111–311 s wall, ~3.1 min/post including idle.
