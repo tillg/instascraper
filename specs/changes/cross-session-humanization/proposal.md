@@ -31,12 +31,21 @@ Three distinct leaks, each an *inversion* of the signal the last change bought:
   which is meaningless outside one process — there is no way to carry it over even
   if we wanted to.
 - **Repeated cold app-opens.** `auth.get_client` calls `humanizer.warmup(client)`
-  on every session load or login (`auth.py:233, 257, 284`). Ten runs in three
+  on every session load or login (`auth.py:238, 262, 289`). Ten runs in three
   minutes means ten "just opened the app" bursts. Nobody cold-opens Instagram ten
   times in three minutes; the *repetition* is a signal the single-run design
   cannot see.
+- **The session-validation request nobody paces or counts.** `auth.py:236` calls
+  `client.get_timeline_feed()` on *every* reused session — before warm-up, before
+  any gate, and never `record()`ed. So gating warm-up on a cold open removes the
+  0–2 *extra* calls but not the one that is always there: ten invocations still
+  emit ten timeline hits in three minutes. Worse, because it is uncounted, no
+  ceiling can see it — after a day cap stops the run, every further invocation
+  that day still costs one real API call. This is the leak that decides *where*
+  the paced timeline begins: not at the first post fetch, but at the first
+  packet of the run.
 
-A fourth, subtler one: the active-hours edge jitter is drawn per `Humanizer`
+A fifth, subtler one: the active-hours edge jitter is drawn per `Humanizer`
 (`behavior.py:135-136`). Across many runs the 08:00/23:00 boundary **flickers**
 run to run instead of sitting at one shifted place for the day — the jitter reads
 as noise rather than as a person whose bedtime is 23:14 today.
@@ -83,13 +92,20 @@ Concretely:
    session counters; anything shorter continues the previous one. This is the
    human notion the ceiling names already imply — you put the phone down for half
    an hour, that's a new sitting.
-4. **Owed idle before the first post.** On startup, if the ledger says the last
-   action was *n* seconds ago and a sampled `post_delay` is longer than *n*, wait
-   the remainder before the first fetch. Ten sequential runs then pace exactly
-   like one batch of ten.
-5. **Warm-up only on a genuinely new session.** `warmup()` fires when the gap
-   indicates a cold open, and is skipped mid-session — killing the ten-cold-opens
-   signal.
+4. **Owed idle before the first *request*, which means before login.** On startup,
+   if the ledger says the last action was *n* seconds ago and a sampled post
+   think-time (the same draw the batch path uses between posts, long-pause tail
+   included) is longer than *n*, wait the remainder — and wait it *before*
+   `get_client`, because the session-validation `get_timeline_feed` is already a
+   real request. Ten sequential runs then pace exactly like one batch of ten on
+   the wire, not just in their post fetches. The ledger therefore opens before the
+   account is known, keyed on the configured username the way
+   `auth._settings_path` (`auth.py:123-127`) already keys the session file.
+5. **Warm-up only on a cold open**, where "cold open" gets its **own** threshold
+   (`foreground_idle`, 5 min) rather than borrowing the session boundary. Ten runs
+   in three minutes warm up once — killing the ten-cold-opens signal — while a run
+   26 minutes later still warms up, because the app plainly was not open. Two
+   questions ("same sitting?" / "app still open?") deserve two numbers.
 6. **Per-day ceilings** (`max_posts_per_day`, `max_requests_per_day`). These are
    the payoff of persistence: a daily cap is meaningless without it, which is why
    the previous change shipped only session + window ceilings despite naming a
@@ -102,6 +118,13 @@ Concretely:
    waits briefly, then exits with a clear message. Two simultaneous runs are both
    a correctness problem (lost ledger updates) and a behavioral one — a person has
    one phone.
+**Deliberately not here: the pacing log.** An append-only trail of every pacing
+decision, for the long-horizon questions a single run's stdout structurally cannot
+answer, was part of an earlier draft of this proposal and now lives in
+`specs/changes/pacing-log/`. It was ~40% of this plan for a file nothing in the tool
+reads, and its most valuable events (`owed_idle`, a skipped `warmup`, a day ceiling
+binding) do not exist until this change lands. Separate thesis, separate risk,
+separate change.
 
 ## Scope
 
@@ -110,10 +133,11 @@ Concretely:
 - New `activity.py` (ledger: schema, load/prune/atomic-save, lock).
 - `behavior.py`: wall-clock window; ledger-seeded counters and window; session
   continuity via `session_idle_reset`; `owed_idle()`; date-derived edge jitter;
-  day ceilings; `record()` persists.
-- `auth.py`: warm-up gated on "is this a new session".
-- `cli.py`: build the ledger, pace before the *first* post when idle is owed,
-  release the lock and flush the ledger on every exit path.
+  day ceilings; `record()` persists — and no file I/O of its own, as today.
+- `auth.py`: warm-up gated on "is this a new session"; the session-validation
+  `get_timeline_feed` (`auth.py:236`) recorded like any other request.
+- `cli.py`: build the ledger **before login**, pay owed idle before the first
+  request of any kind, release the lock and flush the ledger on every exit path.
 - `models.py` / provenance: state the ledger was in use, so `post.md` stops
   overstating pacing for loop-driven runs.
 - New CLI flags / `.env` keys / env vars for every new parameter, following the
@@ -133,11 +157,18 @@ Concretely:
   makes the multi-invocation path match it, and must not regress it.
 - **Proxy / IP rotation, CAPTCHA solving, ToS avoidance.** Unchanged from
   `human-behavior-simulation`; the ToS caveat (`cli.py:124`) stays.
+- **The pacing log, and any analytics over it.** `specs/changes/pacing-log/` — a
+  separate change, landing after this one. No `instascrape stats` there either.
+- **Feeding observed pacing back into the profile.** Auto-tuning from observed
+  backoffs needs the log first, and is a follow-up to *that*.
 
 ## Expected outcome
 
-- Ten sequential one-URL runs pace like one ten-URL batch: real `post_delay`
-  idle between them, one warm-up rather than ten, and shared ceilings.
+- Ten sequential one-URL runs become indistinguishable from one ten-URL batch in
+  shape: **nine** post-scale idles instead of zero, drawn from the same
+  distribution (long-pause tail included), one warm-up rather than ten, and shared
+  ceilings. Not *identical* idle — each run reseeds its RNG, which stays out of
+  scope on purpose — but no observable that separates the two paths.
 - `max_posts_per_session` / `max_requests_per_window` actually bind, and a
   per-day cap becomes possible at all.
 - The active-hours boundary is coherent within a day.
@@ -162,6 +193,10 @@ Concretely:
 - **A local record of your own activity.** Timestamps and counts only, chmod 600,
   next to the session file — but it is new data at rest and the docs should say so
   plainly, including how to delete it.
+- **`--no-humanize` now writes a file.** It stops the waiting and the ceilings, not
+  the accounting, so a later humanized run isn't lied to about the day's budget.
+  That narrows a documented promise ("the old fast mode") and has to be said out
+  loud; `--no-humanize --no-activity-ledger` restores it exactly.
 - **No guarantee.** As before: this lowers detection probability; it cannot
   eliminate it. Device history and IP reputation still dominate and remain
   largely outside the tool's control.
