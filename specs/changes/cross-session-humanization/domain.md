@@ -1,8 +1,8 @@
 # Domain: Cross-Session Humanization
 
 New and refined vocabulary. Extends `specs/system/domain.md`, whose glossary
-already carries the humanization terms from the archived
-`human-behavior-simulation` change — existing terms (Behavior profile, Humanizer,
+already carries the humanization terms from the landed
+`human-behavior-simulation` change (its own folder is gone; see git history) — existing terms (Behavior profile, Humanizer,
 Think-time, Rate ceiling, Gate result) keep their meaning except where noted
 under **Refined terms**.
 
@@ -37,7 +37,7 @@ flowchart TD
 | **Activity ledger** | The small JSON document persisting pacing state for one account at `~/.config/instascraper/activity-<account>.json` (chmod 600). Holds **only** timestamps, counters, and a salt — no URLs, shortcodes, captions, or comments. Deleting it is a full reset. |
 | **Activity session** | A run of activity with no gap longer than the **session idle reset**. Replaces "one process" as the meaning of *session* in `max_*_per_session`. Two invocations 10 s apart are one activity session; 40 min apart are two. |
 | **Session idle reset** | The gap (default 30 min) after which the next action starts a new activity session and zeroes the session counters — **the budget question only**. The human reading: how long you put the phone down before picking it up counts as a fresh sitting. |
-| **Foreground idle** | The much shorter gap (default 5 min) after which the app can no longer plausibly have been in the foreground — the screen locked, iOS swapped it out — so the next run is a **cold open** and warms up. Answers a different question from **session idle reset** and therefore is a different number: "was the app still open?", not "is this the same sitting?". Necessarily `foreground_idle ≤ session_idle_reset`, so a new activity session is always also a cold open. |
+| **Foreground idle** | The much shorter gap (default 5 min) after which the app can no longer plausibly have been in the foreground — the screen locked, iOS swapped it out — so the next run is a **cold open** and warms up. Answers a different question from **session idle reset** and therefore is a different number: "was the app still open?", not "is this the same sitting?". Necessarily `foreground_idle ≤ session_idle_reset`, so a new activity session is always also a cold open. Governs the **reused-session** warm-up only; a fresh login is a cold open whatever the gap. |
 | **Last action** | The wall-clock timestamp of the most recent recorded request or post. The anchor for **owed idle** and for the new-session decision. |
 | **Owed idle** | The wait a run performs *before its first request of any kind* — including the session-validation one inside login: `sampled post think-time − (now − last action)`, floored at zero. Drawn from the **same distribution as the inter-post pace**, long-pause tail included, since it stands in for exactly that gap. What makes ten sequential one-URL runs pace like one ten-URL batch. Zero when the ledger is fresh or the gap is already long enough. |
 | **Session validation** | The `get_timeline_feed` a reused session is proved alive with. Not a free health check but the run's **first request** — paced, counted, and gated like any other, since an observer cannot tell it apart from a fetch. |
@@ -45,8 +45,8 @@ flowchart TD
 | **Day counters** | Requests and posts recorded so far in the current **local** day, enabling `max_requests_per_day` / `max_posts_per_day` — ceilings that are meaningless without persistence. Roll over at local midnight, not at a fixed 24 h offset. |
 | **Ledger salt** | A random per-account value generated once and stored in the ledger. Combined with the local date it derives the **active-hours edge shift**, so the boundary is stable for a day and different tomorrow. |
 | **Stable daily edge** | The active-hours boundary derived from `(salt, local date)` instead of drawn per `Humanizer`. Same shifted boundary all day (a person whose bedtime is 23:14 today), rather than a fresh offset every invocation. |
-| **Run lock** | An OS-level advisory exclusive lock (`flock`) held on the ledger for the duration of a run. Serializes ledger writes *and* enforces the behavioral fact that a person uses one phone at a time. |
-| **Cold open** | A run whose gap since the **last action** exceeds **foreground idle** — the app was not still open, so it opens now. The only situation in which **warm-up** fires; back-to-back invocations skip it, because ten cold opens in three minutes is itself the signal. Deliberately *not* tied to the session boundary: a 26-minute gap is one sitting for budget purposes but is unquestionably a fresh app-open. |
+| **Run lock** | An OS-level advisory exclusive lock (`flock`) held on the ledger for the duration of a run — by *every* run, `--no-humanize` included, since accounting continues there. Serializes ledger writes *and* enforces the behavioral fact that a person uses one phone at a time; a second concurrent run for the same account waits `lock_timeout` and then exits fatally rather than interleaving. |
+| **Cold open** | A run that has to open the app: either its gap since the **last action** exceeds **foreground idle**, **or** it mints a session (browser bootstrap / password login), which is an app-open by definition regardless of the gap. The only situation in which **warm-up** fires; back-to-back invocations on a reused session skip it, because ten cold opens in three minutes is itself the signal. Deliberately *not* tied to the session boundary: a 26-minute gap is one sitting for budget purposes but is unquestionably a fresh app-open. Every fresh login is a cold open; not every cold open is a fresh login. |
 
 The **pacing log** — the append-only history that answers *what happened last
 month*, as opposed to the ledger's *where does the budget stand now* — is
@@ -74,18 +74,23 @@ flowchart TD
     Load --> Gap{"gap = now − last_action"}
     Gap -- "> session_idle_reset" --> New["new activity session:\nzero session counters"]
     Gap -- "≤ session_idle_reset" --> Cont["continue session:\nkeep counters"]
-    New --> Owed
-    Cont --> Owed{"owed idle > 0?"}
+    New --> Gate
+    Cont --> Gate{"gate('request')\nhours · day · session · window"}
+    Gate -- "STOP / WAIT" --> Stop["graceful stop —\nbefore spending the first request"]
+    Gate -- PROCEED --> Owed{"owed idle > 0?"}
     Owed -- yes --> Wait["announce + wait the remainder"]
     Owed -- no --> Go
     Wait --> Go(["login — session validation\nis the first packet, recorded"])
-    Go --> WU{"gap > foreground_idle?\n(the other threshold)"}
-    WU -- "yes — cold open" --> Warm["warm-up"] --> Fetch([first post fetch])
+    Go --> WU{"cold open?\ngap > foreground_idle,\nor a fresh login"}
+    WU -- yes --> Warm["warm-up"] --> Fetch([first post fetch])
     WU -- "no — still open" --> Fetch
 ```
 
 The two thresholds are read from the *same* gap and answer different questions, so
-they are two decisions on one measurement, not a sequence.
+they are two decisions on one measurement, not a sequence. The gate runs *before*
+the owed idle deliberately: a run that a ceiling is about to stop must not sleep
+first to be told so, and unlike the in-batch gate it never sleeps out a `WAIT` —
+nothing has been done yet, so stopping is honest and cheap.
 
 ### Recording, and surviving the exit
 
@@ -97,8 +102,8 @@ sequenceDiagram
     participant FS as activity-<account>.json
     CLI->>L: open + lock, load, prune
     L-->>H: window · session/day counters · last_action · salt
+    CLI->>H: gate("request") before login (STOP-only)
     CLI->>H: owed_idle() → announce + wait
-    CLI->>H: gate("request") before login
     Note over CLI: login — session validation recorded
     loop each post
         CLI->>H: gate("post")  %% session, window, AND day ceilings
@@ -137,9 +142,15 @@ sequenceDiagram
   wants the opposite write discipline and gets its own file in its own change
   (`specs/changes/pacing-log/`).
 - **Identity stays stable, behavior stays varied** (unchanged from
-  `human-behavior-simulation`) — and now the *daily* rhythm is stable too. The
+  the landed `human-behavior-simulation`) — and now the *daily* rhythm is stable
+  too. The
   edge jitter is derived, not re-drawn, because a boundary that moves every few
   minutes is noise, not a person.
+- **Idle is owed, not trailing.** The gap between two posts is paid by whoever
+  comes *next*, minus what already elapsed — never as a sleep at the end of a run
+  with nothing after it. A trailing wait would double-count the same wire gap, hold
+  the **run lock** through it, and tax the last post of the day for a successor that
+  may never exist.
 - **Waiting must be visible.** A run that idles before doing anything looks like a
   hang. It announces what it is waiting for and why, and can be opted out of.
 - **Honest limits.** Cross-session continuity closes a real hole in the previous

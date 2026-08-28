@@ -14,10 +14,16 @@ What the tool does, from a user's point of view.
 - **Durable login**: log in once (password, with 2FA/challenge); reused after,
   with a stable emulated device that is never silently re-fingerprinted.
 - **Humanized pacing (on by default)**: sampled think-time between requests,
-  pages, and posts; human-scale comment depth; per-session and per-hour rate
-  ceilings; an active-hours window; and a polite wait-and-retry after a
+  pages, and posts; human-scale comment depth; per-sitting, per-hour and per-day
+  rate ceilings; an active-hours window; and a polite wait-and-retry after a
   rate-limit signal. Every parameter is a `--humanize-*` flag; `--no-humanize`
-  restores the old fast behavior.
+  stops the waiting and the gating for that run.
+- **Pacing that continues across runs (on by default)**: a per-account activity
+  ledger (`activity-<account>.json`) carries the last action, the counters, and
+  the rolling window between invocations, so a loop over URLs paces like one
+  batch — an owed idle before the first request, shared ceilings, one app-open
+  warm-up instead of one per run, and a stable active-hours edge for the day.
+  One run at a time per account. `--no-activity-ledger` opts out for a run.
 - **Remembered settings**: credentials + options saved to `.env` and reused.
 - **Live progress**: each step announces itself and completes on the same line;
   comment scanning shows one dot per page fetched.
@@ -48,6 +54,8 @@ flowchart LR
 | `--delay` | CLI / `.env` | seconds between posts — **only with `--no-humanize`** |
 | `--comment-sort`, `--comment-scan-limit` | CLI / `.env` | ranking rule + depth |
 | `--no-humanize`, `--humanize-*` | CLI / `.env` | pacing policy; defaults in `behavior.BehaviorProfile` |
+| `--no-activity-ledger` | CLI | skip cross-session pacing state for this run |
+| `--activity-file`, `--activity-lock-timeout` | CLI / `.env` | ledger location; how long to wait for another run's lock |
 | `--no-save-config` | CLI | don't persist options/credentials |
 
 Resolution precedence: **CLI flag > saved `.env` > environment variable >
@@ -62,10 +70,14 @@ Two deliberate exceptions to "options are remembered":
   into every later run would defeat it. It applies per run, and is announced on
   stderr each time. A permanent opt-out requires a hand-written
   `INSTASCRAPE_HUMANIZE=false`, which `--humanize` overrides.
-- **Rate state is per process, not persisted.** Session/window counters live in
-  the one `Humanizer` a run creates, so *N* separate invocations do not share a
-  budget and a one-URL run has no inter-post idle at all. Batch with `--file`
-  rather than looping the command — see README "Prefer one batch over many runs".
+- **`--no-activity-ledger` is never persisted either**, for the same reason:
+  cross-session pacing being the default is the point of it. Note what it does
+  *not* cover — `--no-humanize` stops the waiting and the gating but still
+  **records** activity, so a later humanized run is not lied to about the day's
+  budget. Accounting is not pacing, so they are two switches; both together
+  reproduce the pre-humanization tool. Every run, unhumanized ones included,
+  takes the ledger's run lock, so a second concurrent run for one account exits
+  `2` — which is a deliberate narrowing of "the old fast behavior".
 
 ## Outputs
 
@@ -76,9 +88,11 @@ Two deliberate exceptions to "options are remembered":
 - The media files (`<shortcode>[_n].<ext>`, plus a `.jpg` cover for videos).
 
 Exit codes: `0` all good · `1` some items skipped (not found / private /
-transient), **or the run ended gracefully** at a rate ceiling or outside the
-active-hours window · `2` fatal (auth failed / rate-limited past the backoff
-attempts — stopped early).
+transient), **or the run ended gracefully** at a rate ceiling (per sitting, per
+hour, or per day — possibly *before login*, since the pre-login gate never
+sleeps out a full window) or outside the active-hours window · `2` fatal (auth
+failed / rate-limited past the backoff attempts, or another run for the same
+account holds the ledger lock).
 
 ## Out of scope
 

@@ -97,13 +97,28 @@ Cross-cutting decisions, each of which spans several files:
   window → *graceful* stop. Exit `0` = all good, `1` = some skipped or a graceful
   stop, `2` = fatal.
 - **Two options are deliberately never persisted** (`cli._NEVER_SAVED`), unlike
-  every other: `--no-humanize` applies per run only. Humanization being the
-  default is the point of the feature, so a one-off opt-out must not leak into
-  later runs. `--humanize` overrides a hand-written `INSTASCRAPE_HUMANIZE=false`.
-- **Pacing state is per process.** Ceilings, the rolling window, and inter-post
-  idle live in the one `Humanizer` a run builds, so *N* invocations don't share a
-  budget and a one-URL run gets no idle at all. Batch with `--file`; see
-  `specs/changes/cross-session-humanization/` for the proposed fix.
+  every other: `--no-humanize` and `--no-activity-ledger` apply per run only.
+  Humanization and cross-session pacing being the defaults is the point of both
+  features, so a one-off opt-out must not leak into later runs. `--humanize` /
+  `--activity-ledger` override a hand-written `INSTASCRAPE_HUMANIZE=false` /
+  `INSTASCRAPE_ACTIVITY_LEDGER=false`. (`--activity-file` and
+  `--activity-lock-timeout` *do* save: a location and a timeout aren't switches.)
+- **Pacing state is per account, not per process** (`activity.py`). An
+  `ActivityLedger` — `activity-<account>.json`, chmod 600, locked with `flock`
+  for the run — carries `last_action`, the activity-session and day counters, the
+  rolling window (wall-clock epochs, *not* `monotonic`), and a salt across
+  invocations. `cli.main` opens it **before `get_client`**, then gates
+  (`gate_before_login`, STOP-only — a persisted window must not become a silent
+  hour before login) and pays `owed_idle()`, because the session-validation
+  `get_timeline_feed` is already a real request. So ten one-URL runs pace like one
+  ten-URL batch — nine gaps, shared ceilings, one warm-up
+  (`tests/test_cross_session.py` pins exactly that, and the one residual: ten
+  validations against the batch's one). Two thresholds read one gap:
+  `session_idle_reset` (30 min, "same sitting?") and `foreground_idle` (5 min,
+  "app still open?"); a fresh login is a cold open regardless. `--no-humanize`
+  stops the waiting and the gating but still **records** — accounting is not
+  pacing — and only `--no-activity-ledger` stops the file. The `cli.py` guard that
+  skips pacing after the last post **stays**: that gap is the next run's owed idle.
 - **Progress UI:** `cli.Progress` prints "announce… → complete on the same line",
   with one dot per fetched comment page. `scraper.NullProgress` is the no-op sink
   used by library callers and tests.

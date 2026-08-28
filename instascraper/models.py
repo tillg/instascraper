@@ -34,7 +34,7 @@ class Provenance:
     # this differ from the configured limit, and the top-10 is ranked over this
     # set — so provenance must state it rather than overstate the depth.
     comments_scanned: int = 0
-    humanization: str = "off"  # BehaviorProfile.summary() — how the run was paced
+    humanization: str = "off"  # Humanizer.pacing_summary() — how the run was paced
     tool: str = "instascraper"
 
 

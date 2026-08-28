@@ -9,6 +9,7 @@ from instagrapi import Client as UpstreamClient
 import instascraper.auth as auth
 import instascraper.fingerprint as fingerprint
 from instascraper.auth import make_links_clickable
+from instascraper.activity import ActivityLedger
 from instascraper.behavior import BehaviorProfile, Humanizer, Range
 
 
@@ -274,3 +275,67 @@ def test_no_humanizer_keeps_todays_behavior(fake_client, tmp_path):
     client, progress = _reuse_session(tmp_path, "android")
     assert client.delay_range == auth.DELAY_RANGE
     assert client.feed_calls == 1
+
+
+# --- cold opens: the validation request is counted, warm-up is not repeated ---
+
+
+def _humanizer(tmp_path, *, gap=None, warmup=2, clock_start=10_000.0):
+    """A humanizer over a real ledger whose `last_action` is `gap` seconds ago."""
+    clock = _LedgerClock(clock_start)
+    ledger = ActivityLedger(
+        tmp_path / "activity-tillg.json",
+        window_seconds=3600, now=clock.now, sleep=clock.sleep,
+    ).__enter__()
+    if gap is not None:
+        ledger.activity.last_action = clock.t - gap
+    hum = Humanizer(
+        BehaviorProfile(warmup_calls=Range(warmup, warmup)),
+        rng=random.Random(0),
+        sleep=lambda s: None,
+        now=clock.now,
+        ledger=ledger,
+    )
+    return hum, ledger
+
+
+class _LedgerClock:
+    def __init__(self, start: float) -> None:
+        self.t = start
+
+    def now(self) -> float:
+        return self.t
+
+    def sleep(self, seconds: float) -> None:
+        self.t += seconds
+
+
+def test_validating_a_reused_session_counts_as_one_request(fake_client, tmp_path):
+    hum, _ = _humanizer(tmp_path, gap=30, warmup=0)
+    client, _ = _reuse_session(tmp_path, "android", humanizer=hum)
+    assert client.feed_calls == 1
+    assert hum.requests == 1              # the one request no counter used to see
+    assert len(hum._window) == 1
+
+
+def test_a_warm_app_skips_the_warmup(fake_client, tmp_path):
+    hum, _ = _humanizer(tmp_path, gap=90)  # inside foreground_idle
+    client, _ = _reuse_session(tmp_path, "android", humanizer=hum)
+    assert not hum.is_cold_open()
+    assert client.feed_calls == 1          # validation only — no app-open burst
+
+
+def test_a_cold_open_still_warms_up(fake_client, tmp_path):
+    hum, _ = _humanizer(tmp_path, gap=26 * 60)  # cold open, but not a new session
+    client, _ = _reuse_session(tmp_path, "android", humanizer=hum)
+    assert hum.is_cold_open() and not hum.is_new_session()
+    assert client.feed_calls == 3           # validation + 2 warm-up calls
+
+
+def test_a_fresh_login_warms_up_whatever_the_gap(fake_client, tmp_path):
+    """Minting a session is an app-open; gating it on the gap models a script."""
+    hum, _ = _humanizer(tmp_path, gap=90)
+    assert not hum.is_cold_open()
+    client, _ = _new_session_login(tmp_path, "android", humanizer=hum)
+    assert client.logins == 1
+    assert client.feed_calls == 2           # the 2 warm-up calls, no validation

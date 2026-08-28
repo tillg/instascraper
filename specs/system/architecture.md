@@ -16,7 +16,10 @@ Dependencies: `instagrapi`, `browser_cookie3`.
 ```mermaid
 flowchart TD
     CLI["cli.py — argparse, option resolution, Progress UI"] --> CONFIG["config.py — ~/.config/instascraper/.env"]
+    CLI --> ACT["activity.py — ActivityLedger (lock · load · prune · atomic save)"]
+    ACT --> LFS[("~/.config/instascraper/\nactivity-&lt;account&gt;.json")]
     CLI --> BEH["behavior.py — BehaviorProfile, Humanizer"]
+    ACT -->|"window · counters · last_action · salt"| BEH
     CLI --> AUTH["auth.py — get_client()"]
     CLI --> URLP["url.py — parse_shortcode()"]
     CLI --> SCRAPE["scraper.py — scrape(), select_top_comments()"]
@@ -38,7 +41,8 @@ flowchart TD
 |--------|----------------|
 | `cli.py` | Parse args; resolve options (**CLI > .env > env var > default**); persist them; `Progress` UI; orchestrate auth → per-URL scrape → write; classify errors / exit codes. |
 | `config.py` | Load/save the `.env` config (credentials + option defaults), chmod 600. |
-| `behavior.py` | `BehaviorProfile` (all pacing policy, pure data) + `Humanizer` (applies it: think-time, early-stop, rate gating, backoff, warm-up) + `build_profile(opts)`. |
+| `behavior.py` | `BehaviorProfile` (all pacing policy, pure data) + `Humanizer` (applies it: think-time, early-stop, rate gating, backoff, warm-up, owed idle, activity-session and cold-open decisions) + `build_profile(opts)`. Policy only — no file I/O of its own. |
+| `activity.py` | `ActivityLedger` — the *persistence* half of pacing: the per-account `Activity` document, its versioned schema, load + prune, atomic private write, and the run lock. The only file-touching code in the pacing path, which is what keeps `behavior.py` pure and its tests sleep-free. |
 | `auth.py` | `get_client()`: reuse persisted session → else browser import → else password login (2FA/challenge handled); seeds the emulated device for **new** sessions only. |
 | `fingerprint.py` | `Client` — an `instagrapi.Client` subclass that owns what a request *looks like*: drops instagrapi's forged per-user signed tokens, holds one `X-Pigeon-Session-Id` per run, echoes the `WWW-Claim` Instagram issues, and fetches media bytes as the app instead of `python-requests`. |
 | `url.py` | `parse_shortcode()` for `/p/`, `/reel/`, `/tv/` URLs. |
@@ -63,6 +67,10 @@ flowchart TD
     Save --> Ready
 ```
 
+- Pacing state is persisted separately, in `activity-<user>.json` — never mixed
+  into the session JSON, which is instagrapi's `dump_settings` format and *is*
+  the device identity. Volatile counters must not risk the one thing that must
+  never drift.
 - Session persisted to `~/.config/instascraper/session-<user>.json`; reuse needs
   no password and works non-interactively. Device UUIDs are kept stable across
   re-logins (the anti-flag measure).
@@ -78,8 +86,10 @@ flowchart TD
   `BehaviorProfile.request_delay` (`auth._delay_range`), falling back to the old
   `[1, 3]` constant when unhumanized — per-request pacing stays single-sourced
   rather than double-sleeping around instagrapi's own delay.
-- Optional `humanizer.warmup(client)` after a session load or fresh login makes
-  a few benign app-open calls; a failure there never fails the run.
+- Optional `humanizer.warmup(client)` makes a few benign app-open calls; a
+  failure there never fails the run. After a **fresh login** it is
+  unconditional; after a **session load** it fires only on a cold open, since ten
+  cold opens in three minutes is itself the signal.
 
 ## Scrape & write flow (per URL)
 
@@ -133,8 +143,13 @@ comments rather than all of them. Evidence, and what did *not* get modeled, in
 ```mermaid
 flowchart TD
     Resolve[resolve_options] --> Prof["build_profile(opts)"]
-    Prof --> H["Humanizer(profile)"]
-    H --> Login["get_client(humanizer=…) + warmup"]
+    Prof --> Led["ActivityLedger.__enter__\nlock · load · prune"]
+    Led -- "locked elsewhere" --> Busy["exit 2: another run active"]
+    Led --> H["Humanizer(profile, ledger)"]
+    H --> Pre["gate('request') — STOP-only"]
+    Pre -- "STOP / WAIT" --> End
+    Pre -- PROCEED --> Owed["pay owed_idle()"]
+    Owed --> Login["get_client(humanizer=…)\nvalidation recorded · warmup if cold open"]
     Login --> Loop{next URL?}
     Loop -- yes --> Gate["resolve_gate → gate('post')"]
     Gate -- STOP --> End["graceful stop, exit 1"]
@@ -143,14 +158,37 @@ flowchart TD
     Scrape --> Write[write_result]
     Write --> Pace["pace_between_posts → delay('post')"]
     Pace --> Loop
-    Loop -- no --> Done([exit 0/1])
+    Loop -- no --> Close["flush + unlock"] --> Done([exit 0/1])
 ```
 
 - **Gate policy**: `WAIT` is only ever issued for the rolling-window ceiling, so
   it is bounded by `window_seconds`. Session/day ceilings and being outside
   `active_hours` return `STOP` — the tool never blocks for hours; it ends
   gracefully with `EXIT_PARTIAL`. `resolve_gate` sleeps through at most
-  `_MAX_GATE_WAITS` waits so a stalled window can't spin forever.
+  `_MAX_GATE_WAITS` waits so a stalled window can't spin forever. Checked
+  cheapest-and-most-final first: active hours → day → session → window.
+- **Cross-session pacing** (`cli.main` → `activity.ActivityLedger`): the ledger
+  opens and locks **before `get_client`**, keyed on the *configured* username the
+  way `auth._settings_path` keys the session file, because the account only comes
+  out of `get_client` — by which time the run's first request is already sent.
+  Then `gate_before_login` (STOP-only: a persisted window must not become a
+  silent hour before login) and `pay_owed_idle` run, and only then authentication.
+  `record()` flushes after every post, so a killed batch loses at most one post's
+  budget, and the `with` block flushes and unlocks on every exit path.
+- **Two thresholds, one gap**: `session_idle_reset` (30 min) answers "same
+  sitting?" and carries the session budget; `foreground_idle` (5 min) answers
+  "was the app still open?" and gates warm-up. `build_profile` enforces
+  `foreground_idle ≤ session_idle_reset`, so a new activity session is always
+  also a cold open — the converse does not hold, and that asymmetry is the point.
+  A fresh login is a cold open whatever the gap (`auth.get_client`): minting a
+  session is an app-open, so only the reused-session warm-up is gated.
+- **The session-validation request is on the timeline.** `auth.py`'s
+  `get_timeline_feed()` on a reused session is `record()`ed: a request no counter
+  sees is a request no ceiling can bind.
+- **The last post is not paced.** `cli.py`'s `i < len(urls) - 1` guard stays: the
+  gap after a run's final post is paid by whoever comes next, as owed idle minus
+  the elapsed time. A trailing sleep would double-count the same wire gap and
+  hold the run lock through it.
 - **`--delay` is not aliased onto `post_delay`** (`cli.pace_between_posts`).
   `resolve_options` fills `delay=3.0` unconditionally and `save_config` persists
   it, so it cannot signal user intent; mapping it onto the flagship 20–90 s idle
@@ -205,5 +243,8 @@ so it stays device identity's business, minted once and never touched.
   `output/`, `data/`, `.env`, `session-*.json` are git-ignored.
 - **Tests**: network-free **and sleep-free** suite (URL parsing, comment ranking
   + paging, rendering, config, option resolution, progress, auth helpers,
-  behavior profile/humanizer). Anything timing-related injects a seeded
-  `random.Random`, a recording `sleep`, and fake `now`/`wall` clocks.
+  behavior profile/humanizer, activity ledger, and the ten-runs-vs-one-batch
+  convergence). Anything timing-related injects a seeded `random.Random`, a
+  recording `sleep`, and fake `now`/`wall` clocks. `tests/conftest.py` enforces
+  all of it: autouse fixtures redirect every `~/.config/instascraper` path into
+  `tmp_path` and make a real `time.sleep` or `socket.connect` fail the test.

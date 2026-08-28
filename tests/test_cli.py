@@ -1,11 +1,14 @@
 """Network-free tests for CLI helpers (arg parsing, option resolution)."""
 
+import json
 import random
+import time
 from datetime import datetime
 
 import instagrapi.exceptions as igex
 import pytest
 
+from instascraper.activity import DEFAULT_LOCK_TIMEOUT
 from instascraper.behavior import (
     PROCEED,
     STOP,
@@ -386,3 +389,196 @@ def test_no_notice_when_humanization_is_off():
     args = build_parser().parse_args(["--no-humanize", "--delay", "8", "some-url"])
     profile = build_profile(resolve_options(args, {}, {}))
     assert delay_flag_notice(profile, args.delay) is None  # --delay is honored
+
+
+# --- cross-session state: flags, precedence, and the run lock -------------
+
+
+def test_the_activity_ledger_is_on_by_default():
+    opts = resolve_options(build_parser().parse_args(["some-url"]), {}, {})
+    assert opts["activity_ledger"] is True
+    assert opts["activity_file"] is None
+    # Unset stays unset, so `activity.DEFAULT_LOCK_TIMEOUT` remains the single
+    # source of default truth — see the next test for why that matters.
+    assert opts["activity_lock_timeout"] is None
+
+
+def test_an_unset_lock_timeout_is_not_fossilised_into_the_config():
+    """A resolved default written to .env would outrank the default forever.
+
+    That is exactly how `--delay 3` came to pin upgrading users to a 3s idle, so
+    an option nobody set must not appear in the saved config at all.
+    """
+    opts = resolve_options(build_parser().parse_args(["some-url"]), {}, {})
+    assert "INSTASCRAPE_ACTIVITY_LOCK_TIMEOUT" not in config_updates(opts)
+
+
+def test_an_unset_lock_timeout_still_bounds_the_wait(tmp_path):
+    """`None` means "use the default", not "wait forever"."""
+    from instascraper.activity import ActivityLedger
+
+    ledger = ActivityLedger(tmp_path / "a.json", window_seconds=3600, lock_timeout=None)
+    assert ledger._lock_timeout == DEFAULT_LOCK_TIMEOUT
+
+
+def test_no_activity_ledger_is_honored_but_never_persisted():
+    opts = resolve_options(
+        build_parser().parse_args(["--no-activity-ledger", "some-url"]), {}, {}
+    )
+    assert opts["activity_ledger"] is False
+    # Cross-session pacing is the default and must stay it: a one-off opt-out
+    # must not leak into every later run.
+    assert "INSTASCRAPE_ACTIVITY_LEDGER" not in config_updates(opts)
+
+
+def test_the_ledger_can_be_forced_back_on_over_a_hand_written_opt_out():
+    cfg = {"INSTASCRAPE_ACTIVITY_LEDGER": "false"}
+    args = build_parser().parse_args(["--activity-ledger", "some-url"])
+    assert resolve_options(args, cfg, {})["activity_ledger"] is True
+    assert resolve_options(build_parser().parse_args(["some-url"]), cfg, {})[
+        "activity_ledger"
+    ] is False
+
+
+def test_the_ledger_location_and_lock_timeout_do_persist(tmp_path):
+    args = build_parser().parse_args(
+        ["--activity-file", str(tmp_path / "a.json"),
+         "--activity-lock-timeout", "12", "some-url"]
+    )
+    updates = config_updates(resolve_options(args, {}, {}))
+    assert updates["INSTASCRAPE_ACTIVITY_FILE"] == str(tmp_path / "a.json")
+    assert updates["INSTASCRAPE_ACTIVITY_LOCK_TIMEOUT"] == 12.0
+
+
+def test_the_new_pacing_options_follow_the_precedence_chain():
+    args = build_parser().parse_args(["--humanize-max-posts-per-day", "11", "some-url"])
+    cfg = {"INSTASCRAPE_HUMANIZE_MAX_POSTS_PER_DAY": "22",
+           "INSTASCRAPE_HUMANIZE_SESSION_IDLE_RESET": "900"}
+    environ = {"INSTASCRAPE_HUMANIZE_SESSION_IDLE_RESET": "60",
+               "INSTASCRAPE_HUMANIZE_FOREGROUND_IDLE": "45",
+               "INSTASCRAPE_HUMANIZE_MAX_REQUESTS_PER_DAY": "777"}
+    profile = build_profile(resolve_options(args, cfg, environ))
+    assert profile.max_posts_per_day == 11            # CLI wins
+    assert profile.session_idle_reset == 900.0        # config beats env
+    assert profile.foreground_idle == 45.0            # env beats default
+    assert profile.max_requests_per_day == 777
+    assert profile.max_posts_per_session == BehaviorProfile().max_posts_per_session
+
+
+def test_a_concurrent_run_for_the_same_account_exits_fatally(capsys, tmp_path):
+    from instascraper.activity import ActivityLedger
+    from instascraper.cli import EXIT_FATAL, main
+
+    path = tmp_path / "activity-tillg.json"
+    held = ActivityLedger(path, window_seconds=3600, lock_timeout=0.0)
+    with held:
+        code = main(["--username", "tillg", "--activity-file", str(path),
+                     "--no-save-config", "--activity-lock-timeout", "0",
+                     "https://www.instagram.com/p/ABC/"])
+    assert code == EXIT_FATAL
+    err = capsys.readouterr().err
+    assert "Another instascrape is running for @tillg" in err
+    assert "one phone" in err
+
+
+def test_the_ledger_is_flushed_and_unlocked_even_on_a_fatal_exit(tmp_path, monkeypatch):
+    """`with` around the whole run: every exit path releases and saves."""
+    from instascraper import cli
+    from instascraper.activity import ActivityLedger
+
+    path = tmp_path / "activity-tillg.json"
+
+    def boom(**kwargs):
+        raise SystemExit("login failed")
+
+    monkeypatch.setattr(cli, "get_client", boom)
+    with pytest.raises(SystemExit):
+        cli.main(["--username", "tillg", "--activity-file", str(path),
+                  "--no-save-config", "--no-humanize",
+                  "https://www.instagram.com/p/ABC/"])
+    assert path.exists()  # flushed on the way out
+
+    # …and the lock is free, so the next run is not blocked by the last crash.
+    with ActivityLedger(path, window_seconds=3600, lock_timeout=0.0):
+        pass
+
+
+def test_a_full_window_stops_the_run_before_login(tmp_path, monkeypatch, capsys):
+    """The pre-login gate is STOP-only: no silent hour, and no login."""
+    from instascraper import cli
+    from instascraper.activity import Activity, ActivityLedger
+
+    path = tmp_path / "activity-tillg.json"
+    now = time.time()
+    seeded = Activity(last_action=now - 5, window=[now - 1] * 200)
+    path.write_text(json.dumps(seeded.to_dict()))
+
+    def unreachable(**kwargs):
+        raise AssertionError("get_client must not be called")
+
+    monkeypatch.setattr(cli, "get_client", unreachable)
+    code = cli.main(["--username", "tillg", "--activity-file", str(path),
+                     "--no-save-config", "https://www.instagram.com/p/ABC/"])
+    assert code == cli.EXIT_PARTIAL
+    err = capsys.readouterr().err
+    assert "Stopping before login" in err
+    assert "try again in" in err  # the window's clearing time, not a silent wait
+
+
+def test_a_day_ceiling_stops_before_any_idle_is_paid(tmp_path, monkeypatch, capsys):
+    from instascraper import cli
+    from instascraper.activity import Activity
+
+    path = tmp_path / "activity-tillg.json"
+    now = time.time()
+    spent = Activity(last_action=now - 2, day=datetime.now().date().isoformat(),
+                     day_requests=99_999)
+    path.write_text(json.dumps(spent.to_dict()))
+
+    monkeypatch.setattr(cli, "get_client", lambda **kw: (_ for _ in ()).throw(
+        AssertionError("get_client must not be called")))
+    # A real `time.sleep` would fail the suite outright (see conftest), so this
+    # also proves no owed idle was paid before the stop.
+    assert cli.main(["--username", "tillg", "--activity-file", str(path),
+                     "--no-save-config", "https://www.instagram.com/p/ABC/"]) == \
+        cli.EXIT_PARTIAL
+    assert "daily request ceiling" in capsys.readouterr().err
+
+
+def test_owed_idle_is_announced_and_waited(tmp_path):
+    """It must never look like a hang."""
+    from instascraper.activity import ActivityLedger
+    from instascraper.cli import Progress, pay_owed_idle
+
+    clock = _Clock(10_000.0)
+    ledger = ActivityLedger(tmp_path / "a.json", window_seconds=3600,
+                            now=clock.now, sleep=clock.sleep).__enter__()
+    ledger.activity.last_action = clock.t - 3
+    hum = Humanizer(BehaviorProfile(), rng=random.Random(1), sleep=clock.sleep,
+                    now=clock.now, ledger=ledger)
+    owed = pay_owed_idle(hum, Progress())
+    assert owed > 0
+    assert clock.slept == [owed]
+
+
+def test_pay_owed_idle_is_a_no_op_without_a_ledger():
+    from instascraper.cli import Progress, pay_owed_idle
+
+    clock = _Clock(0.0)
+    hum = Humanizer(BehaviorProfile(), rng=random.Random(1), sleep=clock.sleep,
+                    now=clock.now)
+    assert pay_owed_idle(hum, Progress()) == 0.0
+    assert clock.slept == []
+
+
+class _Clock:
+    def __init__(self, start: float) -> None:
+        self.t = start
+        self.slept: list[float] = []
+
+    def now(self) -> float:
+        return self.t
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.t += seconds

@@ -17,6 +17,12 @@ from pathlib import Path
 
 import instagrapi.exceptions as igex
 
+from instascraper.activity import (
+    DEFAULT_LOCK_TIMEOUT,
+    ActivityLedger,
+    LedgerBusy,
+    activity_path,
+)
 from instascraper.auth import DELAY_RANGE, get_client
 from instascraper.behavior import (
     STOP,
@@ -277,6 +283,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Request ceiling within the rolling window. Default: 200",
     )
     h.add_argument(
+        "--humanize-max-requests-per-day", metavar="N",
+        help="Request ceiling for one local day, across runs. Default: 1000",
+    )
+    h.add_argument(
+        "--humanize-max-posts-per-day", metavar="N",
+        help="Post ceiling for one local day, across runs. Default: 150",
+    )
+    h.add_argument(
+        "--humanize-session-idle-reset", metavar="SECONDS",
+        help="Idle gap after which the next run counts as a new session and the "
+        "per-session ceilings start over. Default: 1800",
+    )
+    h.add_argument(
+        "--humanize-foreground-idle", metavar="SECONDS",
+        help="Idle gap after which the app can no longer have been open, so the "
+        "next run warms up. Must not exceed the session reset. Default: 300",
+    )
+    h.add_argument(
         "--humanize-active-hours", metavar="START,END",
         help='Local hours when activity is plausible, or "off" for anytime. '
         "Outside them the run stops gracefully. Default: 8,23",
@@ -300,6 +324,35 @@ def build_parser() -> argparse.ArgumentParser:
     h.add_argument(
         "--humanize-seed", metavar="N",
         help="Seed the pacing RNG for reproducible runs. Default: random",
+    )
+    a = p.add_argument_group(
+        "cross-session state",
+        "Pacing is continuous across runs: a small per-account ledger of "
+        "timestamps and counters (no URLs, no content) lets ten separate runs "
+        "pace like one batch, and makes the daily ceilings real. On by default.",
+    )
+    a.add_argument(
+        "--no-activity-ledger", dest="activity_ledger", action="store_false",
+        default=None,
+        help="Do not read or write the activity ledger FOR THIS RUN: no owed idle, "
+        "no shared ceilings, no file. Deliberately not saved to config — "
+        "cross-session pacing stays the default.",
+    )
+    a.add_argument(
+        "--activity-ledger", dest="activity_ledger", action="store_true",
+        default=None,
+        help="Force the activity ledger on, overriding an "
+        "INSTASCRAPE_ACTIVITY_LEDGER=false set by hand.",
+    )
+    a.add_argument(
+        "--activity-file", metavar="PATH",
+        help="Override the ledger location. Default: "
+        "~/.config/instascraper/activity-<account>.json",
+    )
+    a.add_argument(
+        "--activity-lock-timeout", type=float, metavar="SECONDS",
+        help="How long to wait for another run's ledger lock before giving up. "
+        f"Default: {DEFAULT_LOCK_TIMEOUT:g}",
     )
     return p
 
@@ -344,6 +397,20 @@ def resolve_options(args, cfg, environ=None) -> dict:
             args.device_profile, "INSTASCRAPE_DEVICE_PROFILE", cfg, environ, "android"
         ),
         "humanize": _pick(args.humanize, "INSTASCRAPE_HUMANIZE", cfg, environ, None, _as_bool),
+        "activity_ledger": _pick(
+            args.activity_ledger, "INSTASCRAPE_ACTIVITY_LEDGER", cfg, environ, True, _as_bool
+        ),
+        "activity_file": _pick(
+            args.activity_file, "INSTASCRAPE_ACTIVITY_FILE", cfg, environ, None
+        ),
+        # Left as None when unset — like every humanization option, and unlike
+        # `delay`: a resolved default that gets written back to the .env would
+        # outrank the built-in default forever and could never signal intent.
+        # `activity.DEFAULT_LOCK_TIMEOUT` applies at the point of use instead.
+        "activity_lock_timeout": _pick(
+            args.activity_lock_timeout, "INSTASCRAPE_ACTIVITY_LOCK_TIMEOUT",
+            cfg, environ, None, float,
+        ),
     }
     for key in _HUMANIZE_KEYS:
         opts[key] = _pick(getattr(args, key, None), ENV_KEYS[key], cfg, environ, None)
@@ -402,12 +469,14 @@ def pace_between_posts(humanizer, fixed_delay, sleep=time.sleep) -> float:
     return 0.0
 
 
-# Options that are never written back to the config file. `humanize` is here on
-# purpose: humanization is the default and must *stay* the default. Persisting a
-# one-off `--no-humanize` would silently leave every later run unhumanized —
-# precisely the state this whole change exists to avoid. Opting out is per-run;
-# a permanent opt-out has to be a deliberate hand-edit of the .env.
-_NEVER_SAVED = frozenset({"humanize"})
+# Options that are never written back to the config file. `humanize` and
+# `activity_ledger` are here on purpose: humanization and cross-session pacing
+# are the defaults and must *stay* the defaults. Persisting a one-off opt-out
+# would silently leave every later run unpaced — precisely the state this exists
+# to avoid. Opting out is per-run; a permanent opt-out has to be a deliberate
+# hand-edit of the .env. (`activity_file` and `activity_lock_timeout` do save:
+# a location and a timeout are not behavior switches.)
+_NEVER_SAVED = frozenset({"humanize", "activity_ledger"})
 
 
 def config_updates(opts: dict) -> dict:
@@ -434,6 +503,40 @@ def delay_flag_notice(profile, explicit_delay) -> str | None:
     return None
 
 
+def pay_owed_idle(humanizer, progress) -> float:
+    """Wait out the idle this run inherited from the previous one.
+
+    Announced, because a run that idles before doing anything otherwise looks
+    like a hang. Paid *before* `get_client`: the session-validation request
+    inside it is already a real request, so idle paid after login is idle
+    Instagram never observed.
+    """
+    owed = humanizer.owed_idle()
+    if owed <= 0:
+        return 0.0
+    progress.start(f"continuing a recent session — idling {owed:.0f}s first")
+    humanizer.wait(owed)
+    progress.ok("ready")
+    return owed
+
+
+def gate_before_login(humanizer, progress) -> GateResult:
+    """The pre-login verdict. STOP-only: a `WAIT` here ends the run.
+
+    In the batch loop a `WAIT` is slept through, because abandoning a run
+    mid-batch throws work away. Before login nothing has been done yet, so
+    there is nothing to protect — and the window is persisted now, which would
+    make that a silent hour before logging in.
+    """
+    result = humanizer.gate("request")
+    if result.action != WAIT:
+        return result
+    return GateResult(
+        STOP,
+        reason=f"{result.reason} — try again in ~{result.seconds / 60:.0f} min",
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     opts = resolve_options(args, load_config())
@@ -442,7 +545,6 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(f"Invalid humanization option — {exc}", file=sys.stderr)
         return EXIT_FATAL
-    humanizer = Humanizer(profile)
 
     if not profile.enabled:
         print(
@@ -450,7 +552,6 @@ def main(argv: list[str] | None = None) -> int:
             "to fingerprint.",
             file=sys.stderr,
         )
-
     notice = delay_flag_notice(profile, args.delay)
     if notice:
         print(notice, file=sys.stderr)
@@ -460,7 +561,46 @@ def main(argv: list[str] | None = None) -> int:
         print("No Instagram URLs found.", file=sys.stderr)
         return EXIT_FATAL
 
+    # The ledger opens *before* login, keyed on the configured username the way
+    # the session file is: the account only comes out of get_client, and by then
+    # the run's first request has already been sent.
+    ledger = ActivityLedger(
+        activity_path(opts["username"], opts["activity_file"]),
+        window_seconds=profile.window_seconds,
+        lock_timeout=opts["activity_lock_timeout"],
+        enabled=opts["activity_ledger"],
+    )
+    try:
+        with ledger:
+            return _run(args, opts, profile, ledger, urls)
+    except LedgerBusy:
+        who = f"@{opts['username']}" if opts["username"] else "this account"
+        print(
+            f"Another instascrape is running for {who}; ledgers would conflict. "
+            "Wait for it to finish (a person has one phone), or pass "
+            "--no-activity-ledger.",
+            file=sys.stderr,
+        )
+        return EXIT_FATAL
+
+
+def _run(args, opts: dict, profile, ledger, urls: list[str]) -> int:
+    """One run, inside the ledger's lock — so every exit path flushes it."""
+    humanizer = Humanizer(profile, ledger=ledger)
     progress = Progress()
+
+    # Pacing starts at the first packet, not the first post fetch: the session
+    # validation inside get_client is already a real request. So gate first —
+    # a run a ceiling will stop must not sleep first to be told so — then pay.
+    gate = gate_before_login(humanizer, progress)
+    if gate.action == STOP:
+        print(
+            f"  ⏹ Stopping before login: {gate.reason}. Nothing fetched — "
+            "re-run later, or pass --no-humanize.",
+            file=sys.stderr,
+        )
+        return EXIT_PARTIAL
+    pay_owed_idle(humanizer, progress)
 
     # Authenticate once (may prompt / exit on failure).
     progress.start(f"logging in as @{opts['username']}" if opts["username"] else "logging in")

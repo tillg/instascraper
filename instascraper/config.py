@@ -26,6 +26,11 @@ ENV_KEYS = {
     # Humanization (instascraper.behavior). Grouped under one prefix so the
     # .env stays readable; every BehaviorProfile field is reachable from here.
     "humanize": "INSTASCRAPE_HUMANIZE",
+    # Cross-session pacing state (instascraper.activity). `activity_ledger` is
+    # never saved (cli._NEVER_SAVED); the file and the lock timeout are.
+    "activity_ledger": "INSTASCRAPE_ACTIVITY_LEDGER",
+    "activity_file": "INSTASCRAPE_ACTIVITY_FILE",
+    "activity_lock_timeout": "INSTASCRAPE_ACTIVITY_LOCK_TIMEOUT",
     "humanize_request_delay": "INSTASCRAPE_HUMANIZE_REQUEST_DELAY",
     "humanize_page_delay": "INSTASCRAPE_HUMANIZE_PAGE_DELAY",
     "humanize_post_delay": "INSTASCRAPE_HUMANIZE_POST_DELAY",
@@ -38,6 +43,10 @@ ENV_KEYS = {
     "humanize_max_posts": "INSTASCRAPE_HUMANIZE_MAX_POSTS",
     "humanize_window_seconds": "INSTASCRAPE_HUMANIZE_WINDOW_SECONDS",
     "humanize_max_requests_per_window": "INSTASCRAPE_HUMANIZE_MAX_REQUESTS_PER_WINDOW",
+    "humanize_max_requests_per_day": "INSTASCRAPE_HUMANIZE_MAX_REQUESTS_PER_DAY",
+    "humanize_max_posts_per_day": "INSTASCRAPE_HUMANIZE_MAX_POSTS_PER_DAY",
+    "humanize_session_idle_reset": "INSTASCRAPE_HUMANIZE_SESSION_IDLE_RESET",
+    "humanize_foreground_idle": "INSTASCRAPE_HUMANIZE_FOREGROUND_IDLE",
     "humanize_active_hours": "INSTASCRAPE_HUMANIZE_ACTIVE_HOURS",
     "humanize_active_hours_jitter": "INSTASCRAPE_HUMANIZE_ACTIVE_HOURS_JITTER",
     "humanize_backoff_base": "INSTASCRAPE_HUMANIZE_BACKOFF_BASE",

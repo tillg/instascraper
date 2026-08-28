@@ -174,7 +174,7 @@ def scrape(
         comment_sort=sort,
         comment_scan_limit=scan_limit,
         comments_scanned=len(raw_comments),
-        humanization=humanizer.profile.summary() if humanizer is not None else "off",
+        humanization=humanizer.pacing_summary() if humanizer is not None else "off",
     )
 
     result = ScrapeResult(

@@ -235,7 +235,15 @@ def get_client(
                 )
             client.get_timeline_feed()  # raises if the session is dead
             if humanizer is not None:
-                humanizer.warmup(client)
+                # Not a free health check: this is the run's *first request*, and
+                # an observer cannot tell it from a fetch. So it is counted like
+                # any other — otherwise no ceiling can ever see it.
+                humanizer.record("request")
+                # Warm up only on a cold open. Ten invocations in three minutes
+                # would otherwise be ten "just opened the app" bursts, and the
+                # repetition is itself the signal.
+                if humanizer.is_cold_open():
+                    humanizer.warmup(client)
             return client, client.username or username or "unknown"
         except Exception:
             try:
@@ -259,7 +267,7 @@ def get_client(
             ) from exc
         _dump(client, spath)
         if humanizer is not None:
-            humanizer.warmup(client)
+            humanizer.warmup(client)  # minting a session is an app-open, gap or not
         return client, client.username
 
     # 3. Durable password login (keeps device UUIDs stable across relogins).
@@ -286,5 +294,9 @@ def get_client(
 
     _dump(client, spath)
     if humanizer is not None:
+        # Unconditional, unlike the reused-session path: a fresh login only
+        # happens when there is no usable session, so it cannot repeat on a tight
+        # loop — and a login with no app-open around it is a louder signal than
+        # the burst the gating removes.
         humanizer.warmup(client)
     return client, client.username

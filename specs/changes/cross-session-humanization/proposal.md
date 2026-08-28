@@ -2,8 +2,10 @@
 
 ## Problem
 
-`human-behavior-simulation` made a single `instascrape` **process** look like a
-person using the app. It did nothing about what a *sequence of processes* looks
+`human-behavior-simulation` (landed; its vocabulary now lives in
+`specs/system/domain.md`, its evidence in
+`specs/system/observations-web-cadence.md`) made a single `instascrape`
+**process** look like a person using the app. It did nothing about what a *sequence of processes* looks
 like, because every piece of pacing state lives in the one `Humanizer` that
 `cli.main` constructs (`cli.py:445`) and dies with the process.
 
@@ -97,19 +99,27 @@ Concretely:
    think-time (the same draw the batch path uses between posts, long-pause tail
    included) is longer than *n*, wait the remainder — and wait it *before*
    `get_client`, because the session-validation `get_timeline_feed` is already a
-   real request. Ten sequential runs then pace exactly like one batch of ten on
-   the wire, not just in their post fetches. The ledger therefore opens before the
+   real request. The ceilings are checked *before* that wait, not after: a run a
+   day cap is about to stop should not sleep first to be told so. Ten sequential
+   runs then pace like one batch of ten on the wire — in their first packets, not
+   just in their post fetches — bar the one validation request each still makes
+   (see "Expected outcome"). The ledger therefore opens before the
    account is known, keyed on the configured username the way
    `auth._settings_path` (`auth.py:123-127`) already keys the session file.
 5. **Warm-up only on a cold open**, where "cold open" gets its **own** threshold
-   (`foreground_idle`, 5 min) rather than borrowing the session boundary. Ten runs
+   (`foreground_idle`, 5 min) rather than borrowing the session boundary — and
+   where a *fresh login* counts as one whatever the gap, since minting a session is
+   itself an app-open. Ten runs
    in three minutes warm up once — killing the ten-cold-opens signal — while a run
    26 minutes later still warms up, because the app plainly was not open. Two
    questions ("same sitting?" / "app still open?") deserve two numbers.
 6. **Per-day ceilings** (`max_posts_per_day`, `max_requests_per_day`). These are
    the payoff of persistence: a daily cap is meaningless without it, which is why
    the previous change shipped only session + window ceilings despite naming a
-   day cap in its own proposal.
+   day cap in its own proposal. Their defaults (1000 / 150) are **accepted
+   guesses**, not calibration — there is no multi-day evidence to derive them from
+   — and are flagged as the first numbers to re-tune once
+   `specs/changes/pacing-log/` can report a real per-day rate.
 7. **Stable-for-the-day active-hours edges.** Derive the jitter from the local
    date plus the ledger's per-account salt, so the boundary sits at one place all
    day and moves tomorrow — coherent instead of flickering.
@@ -118,6 +128,7 @@ Concretely:
    waits briefly, then exits with a clear message. Two simultaneous runs are both
    a correctness problem (lost ledger updates) and a behavioral one — a person has
    one phone.
+
 **Deliberately not here: the pacing log.** An append-only trail of every pacing
 decision, for the long-horizon questions a single run's stdout structurally cannot
 answer, was part of an earlier draft of this proposal and now lives in
@@ -136,8 +147,9 @@ separate change.
   day ceilings; `record()` persists — and no file I/O of its own, as today.
 - `auth.py`: warm-up gated on "is this a new session"; the session-validation
   `get_timeline_feed` (`auth.py:236`) recorded like any other request.
-- `cli.py`: build the ledger **before login**, pay owed idle before the first
-  request of any kind, release the lock and flush the ledger on every exit path.
+- `cli.py`: build the ledger **before login**, gate and then pay owed idle before
+  the first request of any kind, keep the `cli.py:552` guard (no trailing pace),
+  release the lock and flush the ledger on every exit path.
 - `models.py` / provenance: state the ledger was in use, so `post.md` stops
   overstating pacing for loop-driven runs.
 - New CLI flags / `.env` keys / env vars for every new parameter, following the
@@ -156,7 +168,7 @@ separate change.
 - **Rewriting the batch path.** `--file` already paces correctly; this change
   makes the multi-invocation path match it, and must not regress it.
 - **Proxy / IP rotation, CAPTCHA solving, ToS avoidance.** Unchanged from
-  `human-behavior-simulation`; the ToS caveat (`cli.py:124`) stays.
+  `human-behavior-simulation`; the ToS caveat (`cli.py:142`) stays.
 - **The pacing log, and any analytics over it.** `specs/changes/pacing-log/` — a
   separate change, landing after this one. No `instascrape stats` there either.
 - **Feeding observed pacing back into the profile.** Auto-tuning from observed
@@ -164,11 +176,18 @@ separate change.
 
 ## Expected outcome
 
-- Ten sequential one-URL runs become indistinguishable from one ten-URL batch in
-  shape: **nine** post-scale idles instead of zero, drawn from the same
+- Ten sequential one-URL runs become **near**-indistinguishable from one ten-URL
+  batch in shape: **nine** post-scale idles instead of zero, drawn from the same
   distribution (long-pause tail included), one warm-up rather than ten, and shared
-  ceilings. Not *identical* idle — each run reseeds its RNG, which stays out of
-  scope on purpose — but no observable that separates the two paths.
+  ceilings. Two things deliberately do not converge, and neither is papered over:
+  - the idle is not *identical* — each run reseeds its RNG, which stays out of
+    scope on purpose;
+  - **one session validation per invocation remains.** Ten runs still make ten
+    `get_timeline_feed` calls where the batch makes one. The leak named above is
+    that this request is unpaced and uncounted, and this change fixes *that* — it
+    becomes paced, gated, and recorded — without being able to remove the call
+    itself; only a daemon could, and that is out of scope. The residual difference
+    is nine extra requests spread along a paced timeline, not ten unpaced bursts.
 - `max_posts_per_session` / `max_requests_per_window` actually bind, and a
   per-day cap becomes possible at all.
 - The active-hours boundary is coherent within a day.
@@ -190,6 +209,12 @@ separate change.
 - **Ceilings that persist can *stop* you.** Today's reset-per-run is, from a
   throughput view, a feature; after this change a day's budget is a real budget.
   That is the point, but it needs to be documented loudly and be tunable.
+- **Concurrent runs for one account now fail.** The lock is taken by *every* run,
+  including `--no-humanize` ones, so launching a second `instascrape` for the same
+  account while a batch is running exits `2` instead of working. That is intended —
+  a person has one phone — but it is a second narrowing of the documented
+  "`--no-humanize` restores the old fast behavior", alongside the file write below.
+  `--no-activity-ledger` is the escape for anyone who wants two at once.
 - **A local record of your own activity.** Timestamps and counts only, chmod 600,
   next to the session file — but it is new data at rest and the docs should say so
   plainly, including how to delete it.

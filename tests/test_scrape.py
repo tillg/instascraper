@@ -284,6 +284,9 @@ def test_provenance_records_the_effective_pacing():
     prov = result.provenance
     assert prov.humanization.startswith("on ·")
     assert "post 20–90s" in prov.humanization
+    # …and whether pacing was continuous across runs, so a loop-driven run that
+    # opted out of the ledger cannot claim the full pacing it did not get.
+    assert prov.humanization.endswith("· ledger off")
     assert prov.comments_scanned == 2  # the single page the fake returns
 
 

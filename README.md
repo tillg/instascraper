@@ -40,8 +40,10 @@ non-interactively) and re-login only if the session dies — reusing the same
 device identity each time so Instagram doesn't flag a "new device" on every run.
 
 The first run takes your username + password; it then saves a durable session to
-`~/.config/instascraper/session-<username>.json`, and (unless `--no-save-config`)
-remembers your credentials and options in `~/.config/instascraper/.env`
+`~/.config/instascraper/session-<username>.json`, keeps its pacing state in
+`~/.config/instascraper/activity-<username>.json`, and (unless
+`--no-save-config`) remembers your credentials and options in
+`~/.config/instascraper/.env`
 (chmod 600) so you can omit them next time. If Instagram asks for a 2FA /
 security-challenge code (email or SMS), you'll be prompted for it.
 
@@ -87,6 +89,8 @@ instascrape --file SAMPLE_URLS.md --target-dir data
 | `--comment-scan-limit N` | `200` | Comments to scan before ranking; `0` = all (clamped under humanization) |
 | `--delay SECONDS` | `3` | Pause between items in batch mode — **only with `--no-humanize`** |
 | `--no-humanize` | off | Turn humanization off (see below) |
+| `--no-activity-ledger` | off | Skip the cross-session pacing state for this run (see below) |
+| `--activity-file PATH` | `~/.config/instascraper/activity-<account>.json` | Where the activity ledger lives |
 | `--no-save-config` | off | Don't write credentials/options to the config file |
 
 All saved options live in `~/.config/instascraper/.env` — `--target-dir`
@@ -113,7 +117,8 @@ So by default `instascrape` paces itself like a person using the app:
 - **Human-scale comment depth** — each page has a 30% chance of being the last,
   and `--comment-scan-limit 0` becomes ~200 rather than "page every comment".
 - **Rate ceilings** — 300 requests / 60 posts per session, 200 requests per
-  rolling hour.
+  rolling hour, and 1000 requests / 150 posts per day. A "session" here is a
+  *sitting*, not a process: activity with no gap longer than 30 minutes.
 - **Active hours** — 08:00–23:00 local, with jittered edges. Outside them the
   run ends gracefully (exit `1`) instead of blocking for hours.
 - **Politeness backoff** — a `PleaseWaitFewMinutes` is waited out (60 s, doubling,
@@ -130,18 +135,55 @@ whole point, and a one-off opt-out silently leaking into later runs would defeat
 it. (A permanent opt-out is possible, but it takes a hand-written
 `INSTASCRAPE_HUMANIZE=false` in the `.env`; `--humanize` overrides that.)
 
-### Prefer one batch over many runs
+### Pacing is continuous across runs
 
-Rate ceilings, the rolling hourly window, and the between-post idle all live in a
-**single process**. Ten separate `instascrape` invocations back-to-back therefore
-get *no* inter-post pacing at all (there is no "next post" in a one-URL run), ten
-fresh app-open warm-ups, and ten reset counters — a worse signal than not pacing
-at all. Put the URLs in one file and make one run of it:
+Ten separate `instascrape` invocations pace like one ten-URL batch, because the
+pacing state outlives the process. A small **activity ledger** per account —
+`~/.config/instascraper/activity-<account>.json`, chmod 600, next to the session
+file — carries the last action, the counters, and the rolling window from one run
+to the next. So a loop over URLs is fine:
 
 ```bash
-instascrape --file urls.md          # ✅ paced, gated, one warm-up
-for u in $(cat urls.txt); do instascrape "$u"; done   # ❌ don't
+instascrape --file urls.md                              # ✅ paced, gated
+for u in $(cat urls.txt); do instascrape "$u"; done     # ✅ also paced now
 ```
+
+What that buys, concretely:
+
+- **Owed idle.** A run started seconds after the last one waits out the rest of a
+  post-scale pause *before its first request* — including the request that only
+  validates the saved session, since that one is already real traffic. It says so
+  (`continuing a recent session — idling 47s first`), so it never looks like a hang.
+- **Ceilings that actually bind**, per sitting, per hour, and **per day**. The two
+  day ceilings (1000 requests, 150 posts) only mean something with a persisted
+  ledger — which is why they exist now and did not before.
+- **One app-open, not ten.** Warm-up fires only on a *cold open*: a gap longer
+  than 5 minutes, or a fresh login. Ten runs in three minutes warm up once.
+- **A coherent daily rhythm.** The jitter on the active-hours edges is derived
+  from the ledger's salt and today's date, so the boundary sits in one place all
+  day (a person whose bedtime is 23:14 today) instead of moving every run.
+
+**One run at a time.** A run holds an advisory lock on its ledger, so a second
+`instascrape` for the same account exits `2` with a clear message rather than
+interleaving — two simultaneous clients for one account is itself a signal, and a
+person has one phone. This applies to `--no-humanize` runs too.
+
+The ledger holds **only timestamps, counters, and a random salt** — no URLs, no
+shortcodes, no captions, no comments. Deleting the file is a full reset (the day's
+budget included); `--activity-file PATH` moves it, `--no-activity-ledger` skips it
+for one run.
+
+`--no-humanize` stops the *waiting and the gating*, but still **records** activity,
+so a later humanized run isn't lied to about the day's budget: without that, a
+60-post unpaced burst would be invisible and the next run would grant itself a
+cold open and a fresh budget it hadn't earned. Accounting is not pacing, so the
+two have separate switches — `--no-humanize --no-activity-ledger` together give
+the pre-humanization tool with no file at all.
+
+The day ceilings are **honest guesses, not measurements**: the live capture the
+other defaults are calibrated against is a single session and says nothing about
+daily volume. They are the first numbers to raise or lower for your own use
+(`--humanize-max-posts-per-day`, `--humanize-max-requests-per-day`).
 
 ```bash
 # Idle 30–120s between posts instead of the default 20–90s:
@@ -316,6 +358,10 @@ its depth. Use `--comment-sort instagram` for first-returned order instead.
   Service. This tool is for **personal archival** of content you can already see
   while logged in — it authenticates as you and does not bypass access controls,
   CAPTCHAs, or rate limits.
+- **A local record of your own activity.** The activity ledger is new data at
+  rest: timestamps and counters for your own runs (never URLs or content), chmod
+  600 under `~/.config/instascraper/`. Delete `activity-<account>.json` to wipe
+  it, or run with `--no-activity-ledger` to never write it.
 - **Personal data / EU-GDPR.** An export contains other people's usernames,
   comment text, and timestamps. Keeping a private archive is one thing;
   **republishing or sharing** it raises data-protection and copyright

@@ -8,15 +8,24 @@ rate ceilings, and computes politeness backoff. Call sites in `scraper.py`,
 never hold timing constants themselves.
 
 The RNG and the clock are injected, so tests are deterministic and never sleep.
+
+Pacing state is *account*-scoped, not process-scoped: an `activity.ActivityLedger`
+carries the counters, the rolling window, and the last action across invocations,
+so ten sequential runs pace like one batch instead of ten fresh starts. Policy
+still lives here; the ledger owns the file.
 """
 
 from __future__ import annotations
 
+import hashlib
 import random
+import sys
 import time
 from collections import deque
 from dataclasses import dataclass, replace
 from datetime import datetime
+
+from .activity import Activity
 
 
 @dataclass(frozen=True)
@@ -37,7 +46,7 @@ class Range:
 
 
 # Defaults calibrated against the live capture in
-# specs/changes/human-behavior-simulation/observations.md: a real session is
+# specs/system/observations-web-cadence.md: a real session is
 # short bursts separated by long, high-variance idle (observed 4.4s → 22s →
 # 57s between actions), and comments get a screenful of reading then abandoned.
 @dataclass(frozen=True)
@@ -57,6 +66,14 @@ class BehaviorProfile:
     max_posts_per_session: int = 60
     window_seconds: int = 3600                  # rolling window
     max_requests_per_window: int = 200
+    # Day ceilings: the payoff of a persisted ledger — a daily budget is
+    # meaningless without one. These two are *accepted guesses*, not calibration:
+    # the live capture is a single session and says nothing about daily volume.
+    max_requests_per_day: int = 1000
+    max_posts_per_day: int = 150
+    # Two thresholds read from the *same* idle gap, answering two questions.
+    session_idle_reset: float = 1800.0          # "same sitting?" — budget carries
+    foreground_idle: float = 300.0              # "app still open?" — warm-up fires
     active_hours: tuple[int, int] | None = (8, 23)  # local; None = anytime
     active_hours_jitter: Range = Range(0.0, 30.0)   # minutes; drawn once per run
     backoff_base: float = 60.0
@@ -119,31 +136,109 @@ class Humanizer:
         profile: BehaviorProfile | None = None,
         rng: random.Random | None = None,
         sleep=time.sleep,
-        now=time.monotonic,
+        now=time.time,
         wall=datetime.now,
+        ledger=None,
     ) -> None:
         self.profile = profile if profile is not None else BehaviorProfile()
         self._rng = rng if rng is not None else random.Random(self.profile.seed)
         self._sleep = sleep
         self._now = now
         self._wall = wall
-        self._window: deque[float] = deque()
-        self.requests = 0
-        self.posts = 0
-        # Soften the active-hours boundary so it isn't the same clock tick every
-        # run. Drawn once per session: the window shifts, it doesn't flicker.
-        self._open_shift = self._edge_shift()
-        self._close_shift = self._edge_shift()
+        # `now` is wall-clock (UTC epoch), not monotonic: monotonic values are
+        # meaningless in another process, so the window could not be persisted.
+        # The consequences (backwards clock, future timestamps) are handled
+        # explicitly instead — see `_gap` and `ActivityLedger.load`.
+        self._ledger = ledger
+        self._activity: Activity = ledger.activity if ledger is not None else Activity()
 
-    def _edge_shift(self) -> float:
-        """A signed active-hours boundary shift, in hours."""
-        magnitude = self.profile.active_hours_jitter.sample(self._rng)
-        return self._rng.choice((-1.0, 1.0)) * magnitude / 60.0
+        activity = self._activity
+        # One measurement of the idle gap, read twice. `None` = nothing to
+        # continue from (fresh ledger), which is both a new session and a cold
+        # open. A backwards clock floors at 0 rather than owing negative idle.
+        self._gap: float | None = (
+            max(0.0, self._now() - activity.last_action)
+            if activity.last_action > 0.0 else None
+        )
+        if self.is_new_session():
+            activity.session_requests = 0
+            activity.session_posts = 0
+        self._roll_day()
+        self.requests = activity.session_requests
+        self.posts = activity.session_posts
+        self._window: deque[float] = deque(activity.window)
+        # Soften the active-hours boundary so it isn't the same clock tick every
+        # run — but derive it, so it sits in one place all day instead of
+        # flickering run to run. Falls back to an RNG draw with no ledger.
+        self._open_shift = self._edge_shift("open")
+        self._close_shift = self._edge_shift("close")
+
+    def _edge_shift(self, which: str) -> float:
+        """A signed active-hours boundary shift, in hours.
+
+        Derived from `(ledger salt, local date)` so the boundary is stable for
+        the day and different tomorrow: a person whose bedtime is 23:14 today,
+        not a boundary that moves every invocation. With no ledger there is no
+        salt, and it falls back to today's RNG draw.
+        """
+        jitter = self.profile.active_hours_jitter
+        salt = self._activity.salt
+        if not salt:
+            magnitude = jitter.sample(self._rng)
+            return self._rng.choice((-1.0, 1.0)) * magnitude / 60.0
+        digest = hashlib.sha256(f"{salt}:{self._today()}:{which}".encode()).digest()
+        frac = int.from_bytes(digest[:8], "big") / 2 ** 64          # [0,1)
+        magnitude = jitter.lo + frac * (jitter.hi - jitter.lo)
+        return (1.0 if digest[8] & 1 else -1.0) * magnitude / 60.0
+
+    # --- activity sessions -------------------------------------------------
+
+    def _today(self) -> str:
+        return self._wall().date().isoformat()
+
+    def _roll_day(self) -> None:
+        """Day counters belong to a *local* date; reset them when it changes."""
+        activity = self._activity
+        today = self._today()
+        if activity.day != today:
+            activity.day, activity.day_requests, activity.day_posts = today, 0, 0
+
+    def is_new_session(self) -> bool:
+        """Is this a fresh sitting — do the session ceilings start over?"""
+        return self._gap is None or self._gap > self.profile.session_idle_reset
+
+    def is_cold_open(self) -> bool:
+        """Was the app plausibly *not* still open, so this run opens it?
+
+        A much shorter horizon than the session boundary: a 26-minute gap is one
+        sitting for budget purposes but unquestionably a fresh app-open. Minting
+        a session is also a cold open — that call is `auth.get_client`'s, since a
+        login is an app-open whatever the gap.
+        """
+        return self._gap is None or self._gap > self.profile.foreground_idle
+
+    def owed_idle(self) -> float:
+        """Seconds still to wait before this run's *first request of any kind*.
+
+        The gap this stands in for is the inter-post pace, so it samples the very
+        same distribution (`delay("post")`, long-pause tail included) and
+        subtracts what already elapsed. Zero with no ledger, on a fresh one, or
+        once the gap is long enough. Paid before login, because the
+        session-validation request is already a real request.
+        """
+        if not self.profile.enabled or self._gap is None:
+            return 0.0
+        return max(0.0, self.sample_delay("post") - self._gap)
 
     # --- think-time ------------------------------------------------------
 
-    def delay(self, kind: str = "request") -> float:
-        """Sleep a sampled think-time for `kind`; return the seconds slept."""
+    def sample_delay(self, kind: str = "request") -> float:
+        """The think-time for `kind`, sampled but *not* slept.
+
+        Split out of `delay()` so `owed_idle()` can draw from the exact same
+        distribution as the pace it stands in for — bare `post_delay` would run
+        ~20% short and would never produce the long tail at all.
+        """
         if not self.profile.enabled:
             return 0.0
         attr = _RANGE_FOR.get(kind)
@@ -155,7 +250,13 @@ class Humanizer:
         # The tail an even drip never produces: the user got distracted.
         if kind != "read_pause" and self._rng.random() < self.profile.long_pause_prob:
             seconds += self.profile.long_pause.sample(self._rng)
-        self._sleep(seconds)
+        return seconds
+
+    def delay(self, kind: str = "request") -> float:
+        """Sleep a sampled think-time for `kind`; return the seconds slept."""
+        seconds = self.sample_delay(kind)
+        if seconds > 0:  # a disabled profile samples 0 and must not sleep at all
+            self._sleep(seconds)
         return seconds
 
     def wait(self, seconds: float) -> None:
@@ -184,15 +285,41 @@ class Humanizer:
     # --- rate ceilings ----------------------------------------------------
 
     def record(self, kind: str = "request") -> None:
-        """Log an action against the session counters and the rolling window."""
+        """Log an action against the counters, the window, and the ledger.
+
+        Deliberately *not* short-circuited on `profile.enabled`: accounting is
+        not pacing. `--no-humanize` stops the waiting and the gating, but a run
+        that acts unpaced and records nothing leaves the ledger stating a
+        falsehood, and the next run then paces against it. Only
+        `--no-activity-ledger` stops the file.
+        """
+        self._roll_day()
+        activity = self._activity
+        now = self._now()
         if kind == "post":
             self.posts += 1
-            return
-        self.requests += 1
-        self._window.append(self._now())
+            activity.day_posts += 1
+        else:
+            self.requests += 1
+            activity.day_requests += 1
+            self._window.append(now)
+        activity.last_action = now
+        activity.session_requests = self.requests
+        activity.session_posts = self.posts
+        activity.window = list(self._window)
+        if kind == "post" and self._ledger is not None:
+            # Flush per post, not per request: one `os.replace` next to a
+            # multi-second paced fetch is free, and a killed batch — exactly when
+            # the state matters — then loses at most one post's worth of budget.
+            self._ledger.flush()
 
     def gate(self, kind: str = "request") -> GateResult:
-        """Verdict on starting the next action. See `GateResult`."""
+        """Verdict on starting the next action. See `GateResult`.
+
+        Checked cheapest-and-most-final first: active hours, then the day
+        ceilings, then the session ceilings, then the rolling window — the only
+        one that ever yields a bounded `WAIT`.
+        """
         p = self.profile
         if not p.enabled:
             return _PROCEED
@@ -202,6 +329,18 @@ class Humanizer:
             return GateResult(
                 STOP,
                 reason=f"outside active hours {lo:02d}:00–{hi:02d}:00",
+            )
+        self._roll_day()
+        activity = self._activity
+        if activity.day_requests >= p.max_requests_per_day:
+            return GateResult(
+                STOP,
+                reason=f"daily request ceiling reached ({p.max_requests_per_day})",
+            )
+        if kind == "post" and activity.day_posts >= p.max_posts_per_day:
+            return GateResult(
+                STOP,
+                reason=f"daily post ceiling reached ({p.max_posts_per_day})",
             )
         if self.requests >= p.max_requests_per_session:
             return GateResult(
@@ -262,6 +401,21 @@ class Humanizer:
         self._sleep(seconds)
         return seconds
 
+    # --- provenance --------------------------------------------------------
+
+    def pacing_summary(self) -> str:
+        """How this run was paced, for `Provenance.humanization`.
+
+        Composed here rather than in `BehaviorProfile.summary()`: the ledger is a
+        collaborator, not profile data, and the frozen dataclass stays pure. The
+        distinction matters to a reader of `post.md` — a run without the ledger
+        got no cross-session idle and no shared ceilings.
+        """
+        summary = self.profile.summary()
+        if not self.profile.enabled:
+            return summary
+        return f"{summary} · ledger {'on' if self._ledger is not None else 'off'}"
+
     # --- warm-up ----------------------------------------------------------
 
     def warmup(self, client) -> int:
@@ -295,6 +449,8 @@ _RANGE_OPTS = {
     "humanize_active_hours_jitter": "active_hours_jitter",
 }
 _FLOAT_OPTS = {
+    "humanize_session_idle_reset": "session_idle_reset",
+    "humanize_foreground_idle": "foreground_idle",
     "humanize_long_pause_prob": "long_pause_prob",
     "humanize_early_stop_prob": "early_stop_prob",
     "humanize_backoff_base": "backoff_base",
@@ -302,6 +458,8 @@ _FLOAT_OPTS = {
 }
 _INT_OPTS = {
     "humanize_scan_depth": "scan_depth_clamp",
+    "humanize_max_requests_per_day": "max_requests_per_day",
+    "humanize_max_posts_per_day": "max_posts_per_day",
     "humanize_max_requests": "max_requests_per_session",
     "humanize_max_posts": "max_posts_per_session",
     "humanize_window_seconds": "window_seconds",
@@ -383,4 +541,15 @@ def build_profile(opts: dict) -> BehaviorProfile:
     if opts.get("humanize_active_hours") is not None:
         changes["active_hours"] = _parse_active_hours(opts["humanize_active_hours"])
 
-    return replace(BehaviorProfile(), **changes)
+    profile = replace(BehaviorProfile(), **changes)
+    if profile.foreground_idle > profile.session_idle_reset:
+        # "Was the app open?" is necessarily a shorter horizon than "is this the
+        # same sitting?". Inverted, a new session would not be a cold open.
+        print(
+            f"  ! humanize_foreground_idle ({profile.foreground_idle:g}s) exceeds "
+            f"humanize_session_idle_reset ({profile.session_idle_reset:g}s); "
+            "raising it to the reset.",
+            file=sys.stderr,
+        )
+        profile = replace(profile, foreground_idle=profile.session_idle_reset)
+    return profile
