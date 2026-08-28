@@ -95,3 +95,14 @@ def test_the_declared_python_floor_is_met_by_the_interpreter_running_the_tests()
     pyproject = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
     floor = tuple(int(p) for p in pyproject["project"]["requires-python"].lstrip(">=").split("."))
     assert sys.version_info[: len(floor)] >= floor
+
+
+def test_the_package_declares_its_license_and_ships_the_file():
+    """A git-installable dependency with no licence is unusable to consumers."""
+    root = Path(__file__).parents[1]
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text())
+    assert pyproject["project"]["license"] == "MIT"
+    assert pyproject["project"]["license-files"] == ["LICENSE"]
+    text = (root / "LICENSE").read_text()
+    assert "MIT License" in text
+    assert "WITHOUT WARRANTY OF ANY KIND" in text

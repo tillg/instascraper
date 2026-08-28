@@ -521,6 +521,15 @@ its depth. Use `--comment-sort instagram` for first-returned order instead.
   short, the scraper backend can be swapped to `instagrapi` without changing the
   CLI or output format (see `specs/changes/initial_scraper/architecture.md`).
 
+## License
+
+[MIT](LICENSE) — © 2026 Till Gartner. Do what you like with the code; keep the
+notice, and note the "AS IS, WITHOUT WARRANTY OF ANY KIND" clause: this tool
+talks to Instagram's private API and can get an account rate-limited or flagged.
+
+The licence covers *this code*, not what you do with it. Instagram's Terms still
+govern the use — see [Notes & limitations](#notes--limitations).
+
 ## Development
 
 ```bash
