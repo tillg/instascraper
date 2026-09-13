@@ -365,6 +365,37 @@ def test_headless_login_explains_itself_instead_of_crashing(fake_client, tmp_pat
     assert "interactively" in message        # …and the interactive one
 
 
+def test_expired_session_is_not_labeled_as_no_session(fake_client, tmp_path, monkeypatch):
+    """A saved session rejected by IG must read 'expired', not 'no session'.
+
+    Both used to collapse into the same 'no usable session' message, which the
+    ingest wrapper reported as `no-session` — hiding that a re-login (not a
+    first-time login) is what's actually needed.
+    """
+    from instagrapi.exceptions import LoginRequired
+
+    monkeypatch.delenv("IG_PASSWORD", raising=False)
+    monkeypatch.setattr(auth.sys.stdin, "isatty", lambda: False, raising=False)
+    monkeypatch.setattr(
+        _FakeClient, "get_timeline_feed",
+        lambda self: (_ for _ in ()).throw(LoginRequired("login_required")),
+    )
+    spath = tmp_path / "session-tillg.json"
+    spath.write_text("{}", encoding="utf-8")  # a session that exists but is dead
+
+    with pytest.raises(SystemExit) as ei:
+        auth.get_client(
+            session_file=str(spath),
+            username="tillg",
+            progress=_RecordingProgress(),
+        )
+    message = str(ei.value)
+    assert "expired" in message.lower()          # names the real state
+    assert "no usable session" not in message    # …not the first-login wording
+    assert "--browser safari" in message         # the interactive repair
+    assert "IG_PASSWORD" in message              # the headless way out
+
+
 def test_a_terminal_still_gets_the_password_prompt(fake_client, tmp_path, monkeypatch):
     monkeypatch.setattr(auth.sys.stdin, "isatty", lambda: True, raising=False)
     monkeypatch.setattr(auth.getpass, "getpass", lambda prompt="": "typed-in-pw")

@@ -217,6 +217,7 @@ def get_client(
     delay_range = _delay_range(humanizer)
     client = _build_client(delay_range)
     saved_uuids = None
+    session_rejected = False  # a session file existed but Instagram refused it
 
     # 1. Reuse a persisted session, validated cheaply. No password needed.
     if spath.exists():
@@ -247,6 +248,7 @@ def get_client(
                     humanizer.warmup(client)
             return client, client.username or username or "unknown"
         except Exception:
+            session_rejected = True
             try:
                 saved_uuids = client.get_settings().get("uuids") or None
             except Exception:
@@ -286,10 +288,21 @@ def get_client(
     if not password:
         if not sys.stdin.isatty():
             progress.done()  # don't leave the message on the "logging in…" line
-            # Cron jobs, pipes, and background runs land here — usually because a
-            # session expired, which is invisible until this point. `getpass`
-            # would fail on the terminal it cannot control and surface as a raw
-            # `termios.error` traceback, so say what happened and what to do.
+            # Cron jobs, pipes, and background runs land here. `getpass` would
+            # fail on the terminal it cannot control and surface as a raw
+            # `termios.error` traceback, so say what happened and what to do —
+            # and distinguish a *dead* session (re-login) from *no* session
+            # (first login), because they need different fixes and a wrapper
+            # that flattens both into "no session" hides which one you have.
+            if session_rejected:
+                raise SystemExit(
+                    f"@{username}'s saved session expired or was rejected by "
+                    "Instagram, and it can't be renewed here: no password given, "
+                    "and stdin is not a TTY to prompt on.\n"
+                    "Re-mint it once interactively — instascrape <url> --browser "
+                    "safari — or set IG_PASSWORD (environment, or the config "
+                    ".env) so headless runs can re-login by themselves."
+                )
             raise SystemExit(
                 f"@{username} needs to log in (no usable session, no password "
                 "given), but there is no terminal to prompt on — stdin is not a "
