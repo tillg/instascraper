@@ -10,7 +10,11 @@ readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
-dependencies = ["instagrapi>=2.16", "browser_cookie3>=0.19"]
+# instagrapi<3 ships DEFAULT_APP_VERSION 428.0.0.47.67, which Instagram now
+# rejects at login with "Your version of Instagram is out of date"; 3.0.x ships
+# a current app version (446.x). Keep the floor at 3.0 so a fresh install can log
+# in at all.
+dependencies = ["instagrapi>=3.0", "browser_cookie3>=0.19"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
