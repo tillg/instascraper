@@ -81,7 +81,18 @@ flowchart TD
   new-device event. A mismatch logs a one-line notice and keeps the session; no
   speculative re-login ever happens. `android` is the coherent choice because
   instagrapi sends Android headers (`X-IG-Android-ID`, `X-IG-Capabilities`)
-  regardless of the user-agent; `ios` changes the UA only and warns.
+  regardless of the user-agent; `ios` changes the UA only and warns. The Android
+  device is a **specific** phone (`ANDROID_DEVICE`, a Samsung Galaxy S24 Ultra),
+  not instagrapi's built-in default — that default (a Pixel 8 Pro, one frozen app
+  build + bloks id) is identical for every library user, a bot cohort. Only the
+  hardware-identity fields are overridden; `set_device` merges them over the
+  coherent default so app-version/bloks stay consistent.
+- **Geo identity is minted, not re-stamped** (`auth.py:_apply_geo`). `geo_profile`
+  (`de` default, `us` available; `GEO_PROFILES`) sets locale/country/country_code
+  and a DST-correct timezone offset **only when minting a new session** — coherent
+  geo matters because a locale/timezone that contradicts the egress IP is itself a
+  signal. Like the device, a reused session keeps its own geo. Applied *after*
+  `_apply_device`, since `set_locale` rewrites the user-agent locale.
 - `request_timeout = 15` on the client. `delay_range` comes from
   `BehaviorProfile.request_delay` (`auth._delay_range`), falling back to the old
   `[1, 3]` constant when unhumanized — per-request pacing stays single-sourced
@@ -115,8 +126,9 @@ sequenceDiagram
 - **Comment paging**: one request per page (mirrors instagrapi's own loop), one
   progress dot per page, honoring the scan limit (`0` = all). Under humanization
   each extra page costs `humanizer.delay("page")` and may be the last
-  (`should_stop_early()`), and `0` is clamped to `scan_depth_clamp` (200) — paging
-  every comment is one of the loudest bot signals there is.
+  (`should_stop_early()`), and `0` is clamped to `scan_depth_clamp` (50) — paging
+  every comment is one of the loudest bot signals there is, so the default reads
+  shallowly (`early_stop_prob` 0.45).
 - **Media**: `writer._download_media` writes all items into the shortcode folder
   from the URLs already on the `media` object (`*_download_by_url`), so no
   metadata is re-fetched; files renamed `<shortcode>[_n].<ext>`; a cover image is

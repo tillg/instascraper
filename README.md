@@ -120,6 +120,7 @@ instascrape --file SAMPLE_URLS.md --target-dir data
 | `--session-file PATH` | `~/.config/instascraper/session-<user>.json` | Where the session is stored/reused |
 | `--browser NAME` | off | Bootstrap login from a logged-in browser (safari, chrome, …) |
 | `--device-profile {android,ios}` | `android` | Device family to emulate when creating a **new** session (see below) |
+| `--geo-profile {de,us}` | `de` | Locale/country/timezone to present when creating a **new** session (see below) |
 | `--comment-sort {likes,instagram}` | `likes` | Ranking rule for the top 10 (see below) |
 | `--comment-scan-limit N` | `200` | Comments to scan before ranking; `0` = all (clamped under humanization) |
 | `--delay SECONDS` | `3` | Pause between items in batch mode — **only with `--no-humanize`** |
@@ -149,11 +150,14 @@ So by default `instascrape` paces itself like a person using the app:
 - **Sampled think-time** instead of fixed sleeps — `1–4 s` between API calls,
   `2–8 s` between comment pages, `20–90 s` between posts, plus a 20% chance of a
   longer 30–120 s "got distracted" break.
-- **Human-scale comment depth** — each page has a 30% chance of being the last,
-  and `--comment-scan-limit 0` becomes ~200 rather than "page every comment".
-- **Rate ceilings** — 300 requests / 60 posts per session, 200 requests per
-  rolling hour, and 1000 requests / 150 posts per day. A "session" here is a
-  *sitting*, not a process: activity with no gap longer than 30 minutes.
+- **Human-scale comment depth** — each page has a 45% chance of being the last,
+  and `--comment-scan-limit 0` becomes ~50 rather than "page every comment".
+  Comment paging is the loudest bot tell, so the defaults read shallowly.
+- **Rate ceilings** — 100 requests / 20 posts per session, 80 requests per
+  rolling hour, and 400 requests / 50 posts per day. A "session" here is a
+  *sitting*, not a process: activity with no gap longer than 30 minutes. These
+  model a person reading reels, not a harvester — timing jitter can't disguise a
+  monotone read-only pattern, so the remaining lever is simply doing less.
 - **Active hours** — 08:00–23:00 local, with jittered edges. Outside them the
   run ends gracefully (exit `1`) instead of blocking for hours.
 - **Politeness backoff** — a `PleaseWaitFewMinutes` is waited out (60 s, doubling,
@@ -190,7 +194,7 @@ What that buys, concretely:
   validates the saved session, since that one is already real traffic. It says so
   (`continuing a recent session — idling 47s first`), so it never looks like a hang.
 - **Ceilings that actually bind**, per sitting, per hour, and **per day**. The two
-  day ceilings (1000 requests, 150 posts) only mean something with a persisted
+  day ceilings (400 requests, 50 posts) only mean something with a persisted
   ledger — which is why they exist now and did not before.
 - **One app-open, not ten.** Warm-up fires only on a *cold open*: a gap longer
   than 5 minutes, or a fresh login. Ten runs in three minutes warm up once.
@@ -251,6 +255,25 @@ speaks Instagram's Android private API and sends Android headers
 (`X-IG-Android-ID`, `X-IG-Capabilities`) on every request. `--device-profile ios`
 changes the user-agent only, leaving it contradicting the rest of the envelope —
 it's available, but it warns, and it isn't recommended.
+
+The emulated Android device is a **specific, plausible** phone (a Samsung Galaxy
+S24 Ultra), deliberately *not* instagrapi's built-in default. That default — a
+Pixel 8 Pro with one frozen app build and bloks id — is byte-for-byte identical
+for every user of the library, i.e. a recognizable bot cohort; only the
+hardware-identity fields are overridden, so the app-version/bloks envelope stays
+coherent.
+
+### Geo identity
+
+An account whose locale and timezone claim one place while every request egresses
+from another is exactly the mismatch a reviewer weights. So a **new** session is
+stamped with a coherent locale/country/timezone via `--geo-profile` (default
+`de` = `de_DE` / `DE` / `Europe/Berlin`; `us` is also built in). Pick the one
+matching where your requests actually leave from. Like the device, geo is a
+session-*mint* decision: a reused session keeps its own, because re-stamping a
+live session's location is itself the "new location" event we avoid — so switch
+by deleting `session-<user>.json` and logging in again (expect one prompt). The
+timezone *offset* is sampled from the zone at mint time, so DST is handled.
 
 ### Request identity
 
@@ -345,7 +368,7 @@ import scrape`).
 
 | Symbol | Purpose |
 |--------|---------|
-| `get_client(session_file=None, browser=None, username=None, password=None, progress=None, humanizer=None, device_profile="android") -> (Client, account)` | Reuse a persisted session → else a browser-cookie bootstrap → else password login. Returns a `fingerprint.Client` and the account name. Records the session-validation request and warms up on a cold open when given a `humanizer`. |
+| `get_client(session_file=None, browser=None, username=None, password=None, progress=None, humanizer=None, device_profile="android", geo_profile="de") -> (Client, account)` | Reuse a persisted session → else a browser-cookie bootstrap → else password login. Returns a `fingerprint.Client` and the account name. `device_profile`/`geo_profile` stamp the emulated device and the locale/country/timezone when **minting** a session (never on a reused one). Records the session-validation request and warms up on a cold open when given a `humanizer`. |
 | `device_family(settings: dict) -> str` | `"android"` / `"ios"` for a persisted session's settings. |
 | `make_links_clickable(message: str) -> str` | Absolutize the relative challenge URLs Instagram puts in error strings. |
 | `DEFAULT_SESSION_DIR`, `DELAY_RANGE`, `DEVICE_PROFILES`, `SUPPORTED_BROWSERS`, `REQUEST_TIMEOUT`, `IOS_DEVICE`, `IOS_USER_AGENT` | Defaults and the supported enumerations. |

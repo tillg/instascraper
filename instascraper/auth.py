@@ -21,7 +21,10 @@ import getpass
 import os
 import re
 import sys
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from instagrapi.exceptions import TwoFactorRequired
 
@@ -43,6 +46,21 @@ REQUEST_TIMEOUT = 15
 
 DEVICE_PROFILES = ("android", "ios")
 
+# A specific, plausible Android device to emulate — deliberately NOT instagrapi's
+# built-in default. That default (a Pixel 8 Pro, `husky`, one frozen app build
+# and bloks id) is byte-for-byte identical for every user of the library, i.e. a
+# recognisable bot cohort. Only the hardware-identity fields are overridden here;
+# `set_device` merges them over instagrapi's coherent default, so android_version,
+# app_version and the bloks id all stay consistent with the app envelope.
+ANDROID_DEVICE = {
+    "manufacturer": "samsung",
+    "model": "SM-S928B",   # Galaxy S24 Ultra
+    "device": "e3q",
+    "cpu": "e3q",
+    "dpi": "480dpi",
+    "resolution": "1440x3120",
+}
+
 # An iPhone-flavoured device + user-agent. See `_apply_device` for why this is
 # not the default: instagrapi's request envelope stays Android regardless.
 IOS_DEVICE = {
@@ -57,6 +75,25 @@ IOS_USER_AGENT = (
     "Instagram 208.0.0.32.135 (iPhone15,3; iOS 17_5_1; en_US; en-US; "
     "scale=3.00; 1290x2796; 314665256) AppleWebKit/605.1.15"
 )
+
+
+@dataclass(frozen=True)
+class GeoProfile:
+    """The locale/country/timezone a minted session presents on the wire."""
+
+    locale: str        # e.g. "de_DE" — also rewrites the user-agent locale
+    country: str       # ISO 3166-1 alpha-2, e.g. "DE"
+    country_code: int  # calling code, e.g. 49
+    timezone: str      # IANA name, e.g. "Europe/Berlin"; offset sampled at apply time
+
+
+# Named geo presets. Extend freely; the point is that *some* coherent geo is
+# applied and that it can be chosen to match where requests actually egress.
+GEO_PROFILES = {
+    "de": GeoProfile("de_DE", "DE", 49, "Europe/Berlin"),
+    "us": GeoProfile("en_US", "US", 1, "America/New_York"),
+}
+DEFAULT_GEO_PROFILE = "de"
 
 
 def make_links_clickable(message: str) -> str:
@@ -118,7 +155,35 @@ def _apply_device(client: Client, device_profile: str, progress) -> None:
         client.set_device(IOS_DEVICE)
         client.set_user_agent(IOS_USER_AGENT)  # after set_device, which rebuilds the UA
     else:
-        client.set_device()  # instagrapi's coherent Android default
+        # A specific Samsung, not instagrapi's shared-default Pixel; `set_device`
+        # merges these over the coherent default so the app envelope stays intact.
+        client.set_device(ANDROID_DEVICE)
+
+
+def _apply_geo(client: Client, geo_profile: str, progress) -> None:
+    """Seed locale / country / timezone. Only ever called when minting a NEW session.
+
+    Coherent geo is the point: an account whose locale and timezone claim one
+    place while every request egresses from another is exactly the mismatch a
+    reviewer weights. Like the device (`_apply_device`), this is a session-mint
+    decision — changing it on a live session is itself a "new location" event, so
+    a reused session keeps whatever it already has.
+
+    The timezone *offset* is sampled from the zone now, so DST is handled and the
+    value matches what a phone in that zone would report today.
+    """
+    geo = GEO_PROFILES.get(geo_profile)
+    if geo is None:
+        progress.stage(
+            f"unknown geo profile {geo_profile!r}; using {DEFAULT_GEO_PROFILE!r}. "
+            f"Known: {', '.join(GEO_PROFILES)}."
+        )
+        geo = GEO_PROFILES[DEFAULT_GEO_PROFILE]
+    client.set_locale(geo.locale)  # also rewrites the UA locale and calls set_country
+    client.set_country(geo.country)
+    client.set_country_code(geo.country_code)
+    offset = int(ZoneInfo(geo.timezone).utcoffset(datetime.now()).total_seconds())
+    client.set_timezone_offset(offset)
 
 
 def _settings_path(username: str | None, session_file: str | None) -> Path:
@@ -198,6 +263,7 @@ def get_client(
     progress=None,
     humanizer=None,
     device_profile: str = "android",
+    geo_profile: str = DEFAULT_GEO_PROFILE,
 ) -> tuple[Client, str]:
     """Return a logged-in instagrapi Client and the account name.
 
@@ -206,10 +272,12 @@ def get_client(
     3. Password login (durable); persists the session for future reuse.
 
     A fresh `Client.login` is a flag-risk event, so it only ever happens when
-    there is no usable session — never speculatively. `device_profile` seeds the
-    emulated device when minting a new session and is deliberately *not* applied
-    to a reused one. `humanizer`, when given, supplies per-request pacing and an
-    optional app-open warm-up.
+    there is no usable session — never speculatively. `device_profile` and
+    `geo_profile` seed the emulated device and the locale/country/timezone when
+    minting a new session, and are deliberately *not* applied to a reused one (a
+    live session is authoritative about both — re-stamping either is the very
+    new-device/new-location event we avoid). `humanizer`, when given, supplies
+    per-request pacing and an optional app-open warm-up.
     """
     progress = progress or NullProgress()
     username = username or os.environ.get("IG_USERNAME")
@@ -259,6 +327,7 @@ def get_client(
     if browser:
         sessionid = _sessionid_from_browser(browser)
         _apply_device(client, device_profile, progress)
+        _apply_geo(client, geo_profile, progress)
         try:
             client.login_by_sessionid(sessionid)
         except Exception as exc:
@@ -284,6 +353,7 @@ def get_client(
     if saved_uuids:
         client.set_uuids(saved_uuids)
     _apply_device(client, device_profile, progress)
+    _apply_geo(client, geo_profile, progress)
     password = password or os.environ.get("IG_PASSWORD")
     if not password:
         if not sys.stdin.isatty():

@@ -114,6 +114,7 @@ def test_resolve_defaults_when_nothing_set():
     assert opts["browser"] is None
     assert opts["session_file"] is None
     assert opts["device_profile"] == "android"
+    assert opts["geo_profile"] == "de"  # coherent-with-egress default
     # Humanization options stay unset so BehaviorProfile owns every default.
     assert opts["humanize"] is None
     assert all(v is None for k, v in opts.items() if k.startswith("humanize_"))
@@ -217,6 +218,22 @@ def test_device_profile_defaults_to_android_and_accepts_ios():
     assert resolve_options(args, {}, {})["device_profile"] == "ios"
     with pytest.raises(SystemExit):
         build_parser().parse_args(["--device-profile", "windows-phone", "some-url"])
+
+
+def test_geo_profile_defaults_to_de_and_accepts_us():
+    assert build_parser().parse_args(["some-url"]).geo_profile is None
+    assert resolve_options(build_parser().parse_args(["some-url"]), {}, {})[
+        "geo_profile"
+    ] == "de"
+    args = build_parser().parse_args(["--geo-profile", "us", "some-url"])
+    assert resolve_options(args, {}, {})["geo_profile"] == "us"
+    # A saved config value is honoured (persisted like device_profile).
+    cfg = {"INSTASCRAPE_GEO_PROFILE": "us"}
+    assert resolve_options(build_parser().parse_args(["some-url"]), cfg, {})[
+        "geo_profile"
+    ] == "us"
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["--geo-profile", "atlantis", "some-url"])
 
 
 # --- gate resolution ------------------------------------------------------

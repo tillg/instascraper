@@ -23,6 +23,7 @@ ENV_KEYS = {
     "browser": "INSTASCRAPE_BROWSER",
     "session_file": "INSTASCRAPE_SESSION_FILE",
     "device_profile": "INSTASCRAPE_DEVICE_PROFILE",
+    "geo_profile": "INSTASCRAPE_GEO_PROFILE",
     # Humanization (instascraper.behavior). Grouped under one prefix so the
     # .env stays readable; every BehaviorProfile field is reachable from here.
     "humanize": "INSTASCRAPE_HUMANIZE",

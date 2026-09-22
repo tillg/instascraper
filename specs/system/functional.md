@@ -51,6 +51,7 @@ flowchart LR
 | `--browser` | CLI | bootstrap login from a logged-in browser |
 | `--session-file` | CLI / `.env` | override session location |
 | `--device-profile` | CLI / `.env` | device family for a **new** session (`android` default) |
+| `--geo-profile` | CLI / `.env` | locale/country/timezone for a **new** session (`de` default) |
 | `--delay` | CLI / `.env` | seconds between posts — **only with `--no-humanize`** |
 | `--comment-sort`, `--comment-scan-limit` | CLI / `.env` | ranking rule + depth |
 | `--no-humanize`, `--humanize-*` | CLI / `.env` | pacing policy; defaults in `behavior.BehaviorProfile` |

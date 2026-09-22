@@ -143,6 +143,10 @@ class _FakeClient:
         self.feed_calls = 0
         self.logins = 0
         self.uuids = None
+        self.locale = "en_US"
+        self.country = None
+        self.country_code = None
+        self.timezone_offset = None
 
     def load_settings(self, path):
         self.user_agent = _FakeClient.session_user_agent
@@ -161,6 +165,20 @@ class _FakeClient:
 
     def set_user_agent(self, user_agent=""):
         self.user_agent = user_agent
+
+    # geo setters (mirror instagrapi: set_locale rewrites the UA locale)
+    def set_locale(self, locale="en_US"):
+        self.user_agent = (self.user_agent or "").replace(self.locale, locale)
+        self.locale = locale
+
+    def set_country(self, country="US"):
+        self.country = country
+
+    def set_country_code(self, country_code=1):
+        self.country_code = country_code
+
+    def set_timezone_offset(self, seconds=0, timezone_name=None):
+        self.timezone_offset = seconds
 
     def set_uuids(self, uuids):
         self.uuids = uuids
@@ -198,6 +216,9 @@ def _new_session_login(tmp_path, device_profile, humanizer=None):
 def test_new_session_gets_the_configured_device_family(fake_client, tmp_path):
     client, progress = _new_session_login(tmp_path, "android")
     assert client.device_applied is True
+    # A specific device, deliberately NOT instagrapi's shared default.
+    assert client.device == auth.ANDROID_DEVICE
+    assert client.device.get("manufacturer") == "samsung"
     assert auth.device_family({"user_agent": client.user_agent}) == "android"
     assert client.logins == 1
     assert progress.messages == []  # nothing to warn about
@@ -206,9 +227,34 @@ def test_new_session_gets_the_configured_device_family(fake_client, tmp_path):
 def test_ios_device_profile_sets_an_ios_user_agent_and_warns(fake_client, tmp_path):
     client, progress = _new_session_login(tmp_path, "ios")
     assert client.device == auth.IOS_DEVICE
-    assert client.user_agent == auth.IOS_USER_AGENT
+    assert "iPhone15,3" in client.user_agent   # still an iOS user-agent…
+    assert client.locale == "de_DE"            # …but geo rewrote the locale coherently
     # Honest about the limitation: the envelope stays Android.
     assert any("user-agent only" in m for m in progress.messages)
+
+
+def test_new_session_applies_the_configured_geo(fake_client, tmp_path):
+    progress = _RecordingProgress()
+    client, _ = auth.get_client(
+        session_file=str(tmp_path / "session-tillg.json"),
+        username="tillg", password="pw", progress=progress,
+        device_profile="android", geo_profile="de",
+    )
+    assert (client.locale, client.country, client.country_code) == ("de_DE", "DE", 49)
+    assert client.timezone_offset in (3600, 7200)  # Berlin: CET / CEST
+    assert "de_DE" in client.user_agent            # locale is coherent on the wire
+    assert progress.messages == []                 # "de" is a known profile
+
+
+def test_unknown_geo_profile_warns_and_falls_back(fake_client, tmp_path):
+    progress = _RecordingProgress()
+    client, _ = auth.get_client(
+        session_file=str(tmp_path / "session-tillg.json"),
+        username="tillg", password="pw", progress=progress,
+        device_profile="android", geo_profile="mars",
+    )
+    assert client.country == "DE"  # fell back to the default
+    assert any("unknown geo profile" in m for m in progress.messages)
 
 
 def test_new_session_delay_range_reflects_the_profile(fake_client, tmp_path):
@@ -236,6 +282,7 @@ def test_reused_session_keeps_its_device_and_never_relogins(fake_client, tmp_pat
     client, progress = _reuse_session(tmp_path, "ios")
     assert client.device_applied is False       # session is authoritative
     assert client.user_agent == ANDROID_UA      # not re-fingerprinted
+    assert client.country is None               # geo not re-stamped on a live session
     assert client.logins == 0                   # and never speculatively re-logged in
     notice = " ".join(progress.messages)
     assert "'android'" in notice and "'ios'" in notice

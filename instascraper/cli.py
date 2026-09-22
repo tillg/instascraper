@@ -23,7 +23,7 @@ from instascraper.activity import (
     LedgerBusy,
     activity_path,
 )
-from instascraper.auth import DELAY_RANGE, get_client
+from instascraper.auth import DEFAULT_GEO_PROFILE, DELAY_RANGE, GEO_PROFILES, get_client
 from instascraper.behavior import (
     STOP,
     WAIT,
@@ -194,6 +194,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Device family to emulate when creating a NEW session: android "
         "(default, coherent) or ios (user-agent only — instagrapi's request "
         "envelope stays Android). An existing session keeps its own device.",
+    )
+    p.add_argument(
+        "--geo-profile", choices=sorted(GEO_PROFILES), metavar="REGION",
+        help="Locale/country/timezone to present when creating a NEW session: "
+        + ", ".join(f"{k} ({v.locale}, {v.timezone})" for k, v in sorted(GEO_PROFILES.items()))
+        + ". Default: " + DEFAULT_GEO_PROFILE + ". Pick the one matching where your "
+        "requests egress — a mismatch between geo and IP is itself a signal. An "
+        "existing session keeps its own geo.",
     )
     p.add_argument(
         "--delay", type=float, metavar="SECONDS",
@@ -395,6 +403,9 @@ def resolve_options(args, cfg, environ=None) -> dict:
         "session_file": _pick(args.session_file, "INSTASCRAPE_SESSION_FILE", cfg, environ, None),
         "device_profile": _pick(
             args.device_profile, "INSTASCRAPE_DEVICE_PROFILE", cfg, environ, "android"
+        ),
+        "geo_profile": _pick(
+            args.geo_profile, "INSTASCRAPE_GEO_PROFILE", cfg, environ, DEFAULT_GEO_PROFILE
         ),
         "humanize": _pick(args.humanize, "INSTASCRAPE_HUMANIZE", cfg, environ, None, _as_bool),
         "activity_ledger": _pick(
@@ -612,6 +623,7 @@ def _run(args, opts: dict, profile, ledger, urls: list[str]) -> int:
         progress=progress,
         humanizer=humanizer,
         device_profile=opts["device_profile"],
+        geo_profile=opts["geo_profile"],
     )
     progress.ok("logged in" if opts["username"] else f"logged in as @{account}")
 

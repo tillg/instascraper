@@ -59,18 +59,26 @@ class BehaviorProfile:
     post_delay: Range = Range(20.0, 90.0)       # between posts — dominant idle
     long_pause: Range = Range(30.0, 120.0)      # occasional "distracted" gap
     long_pause_prob: float = 0.2
-    early_stop_prob: float = 0.3                # per-page chance to stop reading
+    # Comment paging is the loudest bot tell there is, so read shallowly: a person
+    # skims a screenful and moves on far more often than they page to a count.
+    early_stop_prob: float = 0.45               # per-page chance to stop reading
     warmup_calls: Range = Range(0, 2)           # app-open calls (sample_int)
-    scan_depth_clamp: int = 200                 # what `--comment-scan-limit 0` becomes
-    max_requests_per_session: int = 300
-    max_posts_per_session: int = 60
+    scan_depth_clamp: int = 50                  # what `--comment-scan-limit 0` becomes
+    # Volume ceilings: deliberately human-scale. The old values (300/60 per
+    # session, 1000/150 per day) were "won't hammer" guardrails, not a plausible
+    # day of *reading reels*; a real person opens dozens, not hundreds. Lower
+    # ceilings mean the tool stops looking like a harvester well before Instagram
+    # does the maths — the monotone read-only shape is what pacing can't hide, so
+    # the remaining lever is doing less of it.
+    max_requests_per_session: int = 100
+    max_posts_per_session: int = 20
     window_seconds: int = 3600                  # rolling window
-    max_requests_per_window: int = 200
+    max_requests_per_window: int = 80
     # Day ceilings: the payoff of a persisted ledger — a daily budget is
     # meaningless without one. These two are *accepted guesses*, not calibration:
     # the live capture is a single session and says nothing about daily volume.
-    max_requests_per_day: int = 1000
-    max_posts_per_day: int = 150
+    max_requests_per_day: int = 400
+    max_posts_per_day: int = 50
     # Two thresholds read from the *same* idle gap, answering two questions.
     session_idle_reset: float = 1800.0          # "same sitting?" — budget carries
     foreground_idle: float = 300.0              # "app still open?" — warm-up fires

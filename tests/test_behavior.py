@@ -144,6 +144,21 @@ def test_early_stop_disabled_when_humanization_off():
     assert not hum.should_stop_early()
 
 
+def test_default_volume_is_human_scale():
+    """The shipped defaults model a person reading reels, not a harvester.
+
+    These are the levers pacing alone can't hide behind — the monotone read-only
+    shape is the signal, so the defaults simply do less of it. Pinned here so a
+    future loosening is a deliberate, reviewed change, not a drift.
+    """
+    p = BehaviorProfile()
+    assert p.early_stop_prob == 0.45          # skim a screenful, rarely page on
+    assert p.scan_depth_clamp == 50           # `--comment-scan-limit 0` → shallow
+    assert (p.max_requests_per_session, p.max_posts_per_session) == (100, 20)
+    assert p.max_requests_per_window == 80
+    assert (p.max_requests_per_day, p.max_posts_per_day) == (400, 50)
+
+
 def test_scan_limit_zero_is_clamped_only_under_humanization():
     hum, _ = make(BehaviorProfile(scan_depth_clamp=200))
     assert hum.clamp_scan_limit(0) == 200
