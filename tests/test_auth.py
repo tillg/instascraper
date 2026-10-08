@@ -453,3 +453,139 @@ def test_a_terminal_still_gets_the_password_prompt(fake_client, tmp_path, monkey
     )
     assert client.logins == 1
     assert client.login_password == "typed-in-pw"
+
+
+# --- non-interactive login (a server supplies the codes) -------------------
+
+from instagrapi.exceptions import BadPassword as IgBadPassword
+from instagrapi.exceptions import TwoFactorRequired
+
+
+class _ScriptedClient(_FakeClient):
+    """`login` follows a script: 'bad', '2fa-sms', '2fa-totp', 'challenge', 'boom'."""
+
+    script = "ok"
+    instances: list = []
+
+    def __init__(self) -> None:
+        super().__init__()
+        _ScriptedClient.instances.append(self)
+        self.last_json: dict = {}
+        self.challenge_code_handler = None
+        self.codes_used: list = []
+
+    def login(self, username, password, verification_code=None):
+        self.logins += 1
+        s = _ScriptedClient.script
+        if s == "bad":
+            raise IgBadPassword("bad creds for " + password)
+        if s == "boom":
+            raise RuntimeError("kaput " + password)
+        if s.startswith("2fa") and not verification_code:
+            self.last_json = {"two_factor_info": {
+                "sms_two_factor_on": s == "2fa-sms", "totp_two_factor_on": s == "2fa-totp"}}
+            raise TwoFactorRequired("2fa")
+        if s == "challenge":
+            from instagrapi.mixins.challenge import ChallengeChoice
+            verification_code = self.challenge_code_handler(username, ChallengeChoice.EMAIL)
+        self.codes_used.append(verification_code)
+        self.username = username
+
+
+@pytest.fixture
+def scripted(monkeypatch):
+    _ScriptedClient.instances = []
+    _ScriptedClient.script = "ok"
+    monkeypatch.setattr(auth, "Client", _ScriptedClient)
+    monkeypatch.setattr("builtins.input", lambda *a: (_ for _ in ()).throw(AssertionError("input() called")))
+    return _ScriptedClient
+
+
+def _no_code(via):
+    raise AssertionError("no code expected")
+
+
+def test_login_without_codes_saves_session_and_returns_username(scripted, tmp_path):
+    out = auth.login_interactive_free("tillg", "s3cret", _no_code, session_dir=tmp_path)
+    assert out == "tillg"
+    spath = tmp_path / "session-tillg.json"
+    assert spath.exists()
+    assert (spath.stat().st_mode & 0o777) == 0o600
+    c = scripted.instances[0]
+    assert c.device_applied and c.country == "DE"   # same stable device + geo as get_client
+
+
+def test_default_session_dir_is_the_one_get_client_loads_from(scripted, private_config_dir):
+    auth.login_interactive_free("tillg", "pw", _no_code)
+    assert (private_config_dir / "session-tillg.json").exists()
+
+
+def test_existing_session_uuids_are_kept(scripted, tmp_path):
+    (tmp_path / "session-tillg.json").write_text("{}")
+    auth.login_interactive_free("tillg", "pw", _no_code, session_dir=tmp_path)
+    assert scripted.instances[0].uuids == {"uuid": "stable"}
+
+
+@pytest.mark.parametrize("script,via", [("2fa-sms", "SMS"), ("2fa-totp", "authenticator app")])
+def test_two_factor_calls_code_with_via(scripted, tmp_path, script, via):
+    scripted.script = script
+    seen = []
+    def code(v):
+        seen.append(v)
+        return " 123456 "
+    assert auth.login_interactive_free("tillg", "pw", code, session_dir=tmp_path) == "tillg"
+    assert seen == [via]
+    assert scripted.instances[0].codes_used == ["123456"]
+
+
+def test_challenge_code_calls_code_with_via(scripted, tmp_path):
+    scripted.script = "challenge"
+    seen = []
+    auth.login_interactive_free("tillg", "pw", lambda v: seen.append(v) or "999", session_dir=tmp_path)
+    assert seen == ["email"]
+    assert scripted.instances[0].codes_used == ["999"]
+
+
+def test_bad_password(scripted, tmp_path):
+    scripted.script = "bad"
+    with pytest.raises(auth.BadPassword) as ei:
+        auth.login_interactive_free("tillg", "s3cret", _no_code, session_dir=tmp_path)
+    assert "s3cret" not in str(ei.value)
+    assert not (tmp_path / "session-tillg.json").exists()
+
+
+def test_code_timeout(scripted, tmp_path):
+    scripted.script = "2fa-sms"
+    def code(via):
+        raise TimeoutError("nobody answered")
+    with pytest.raises(auth.CodeTimeout):
+        auth.login_interactive_free("tillg", "s3cret", code, session_dir=tmp_path)
+
+
+def test_other_failures_are_login_failed_without_password(scripted, tmp_path):
+    scripted.script = "boom"
+    with pytest.raises(auth.LoginFailed) as ei:
+        auth.login_interactive_free("tillg", "s3cret", _no_code, session_dir=tmp_path)
+    assert "s3cret" not in str(ei.value)
+    assert "kaput" in str(ei.value)
+
+
+def test_code_callback_error_is_login_failed(scripted, tmp_path):
+    scripted.script = "2fa-sms"
+    def code(via):
+        raise ValueError("form closed")
+    with pytest.raises(auth.LoginFailed):
+        auth.login_interactive_free("tillg", "pw", code, session_dir=tmp_path)
+
+
+def test_interactive_path_still_prompts_with_input(fake_client, monkeypatch):
+    prompts = []
+    monkeypatch.setattr("builtins.input", lambda p="": prompts.append(p) or " 42 ")
+    class C(_FakeClient):
+        def login(self, username, password, verification_code=None):
+            if not verification_code:
+                raise TwoFactorRequired("2fa")
+            self.code = verification_code
+    c = C()
+    auth._password_login(c, "tillg", "pw")
+    assert c.code == "42" and "2FA" in prompts[0]

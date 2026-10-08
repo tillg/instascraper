@@ -26,6 +26,9 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from typing import Callable
+
+from instagrapi import exceptions as ig_exc
 from instagrapi.exceptions import TwoFactorRequired
 
 from instascraper.fingerprint import Client
@@ -202,13 +205,107 @@ def _dump(client: Client, spath: Path) -> None:
         pass
 
 
-def _password_login(client: Client, username: str, password: str) -> None:
-    """Password login, prompting for a 2FA code if required."""
+def _login_with_code(client: Client, username: str, password: str, code: Callable[[str], str]) -> None:
+    """Password login; `code(via)` supplies a 2FA code when Instagram asks."""
     try:
         client.login(username, password)
     except TwoFactorRequired:
-        code = input(f"Enter the 2FA code for @{username}: ").strip()
-        client.login(username, password, verification_code=code)
+        client.login(username, password, verification_code=code(_two_factor_via(client)).strip())
+
+
+def _password_login(client: Client, username: str, password: str) -> None:
+    """Password login, prompting for a 2FA code if required."""
+    _login_with_code(
+        client, username, password,
+        lambda via: input(f"Enter the 2FA code for @{username}: "),
+    )
+
+
+class LoginError(Exception):
+    """Base class for `login_interactive_free` failures."""
+
+
+class BadPassword(LoginError):
+    """Instagram rejected the username/password."""
+
+
+class CodeTimeout(LoginError):
+    """The `code` callback raised TimeoutError: nobody supplied a code in time."""
+
+
+class LoginFailed(LoginError):
+    """Any other login failure. The message never contains the password."""
+
+
+def _two_factor_via(client) -> str:
+    info = (getattr(client, "last_json", None) or {}).get("two_factor_info") or {}
+    if info.get("totp_two_factor_on"):
+        return "authenticator app"
+    if info.get("sms_two_factor_on"):
+        return "SMS"
+    return "2FA code"
+
+
+def login_interactive_free(
+    username: str,
+    password: str,
+    code: Callable[[str], str],
+    *,
+    session_dir: str | Path | None = None,
+) -> str:
+    """Password login that never touches stdin; for servers driving a login form.
+
+    Same stable emulated device and geo as `get_client`'s password login, and the
+    session is saved where `get_client` loads it from
+    (`<session_dir>/session-<username>.json`, mode 600; default
+    `~/.config/instascraper`). If a session file already exists its device UUIDs
+    are kept. When Instagram wants a 2FA or challenge code, `code(via)` is
+    called with a short human string ("SMS", "email", "authenticator app", ...); it
+    may block, and returns the code. A TimeoutError from it raises `CodeTimeout`.
+    Returns the logged-in username. Raises `BadPassword`, `CodeTimeout` or
+    `LoginFailed`; none of them carries the password.
+    """
+    spath = _settings_path(username, None) if session_dir is None else Path(session_dir) / f"session-{username}.json"
+    callback_exc: list[BaseException] = []
+
+    def ask(via: str) -> str:
+        try:
+            return str(code(via)).strip()
+        except BaseException as exc:
+            callback_exc.append(exc)
+            raise
+
+    def challenge_handler(_username, choice) -> str:
+        name = getattr(choice, "name", str(choice))
+        return ask({"SMS": "SMS", "EMAIL": "email"}.get(name, name.lower()))
+
+    client = _build_client()
+    client.challenge_code_handler = challenge_handler
+    try:
+        saved_uuids = None
+        if spath.exists():
+            try:
+                old = _build_client()
+                old.load_settings(str(spath))
+                saved_uuids = old.get_settings().get("uuids") or None
+            except Exception:
+                saved_uuids = None
+        if saved_uuids:
+            client.set_uuids(saved_uuids)
+        progress = NullProgress()
+        _apply_device(client, "android", progress)
+        _apply_geo(client, DEFAULT_GEO_PROFILE, progress)
+        _login_with_code(client, username, password, ask)
+        _dump(client, spath)
+        return client.username or username
+    except Exception as exc:
+        cause = callback_exc[0] if callback_exc else exc
+        if isinstance(cause, TimeoutError):
+            raise CodeTimeout("timed out waiting for the verification code") from None
+        if isinstance(exc, (ig_exc.BadPassword, ig_exc.BadCredentials)):
+            raise BadPassword("Instagram rejected the username or password") from None
+        msg = make_links_clickable(f"{type(cause).__name__}: {cause}").replace(password, "***")
+        raise LoginFailed(msg) from None
 
 
 def _sessionid_from_browser(browser: str) -> str:

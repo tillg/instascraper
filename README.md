@@ -369,6 +369,7 @@ import scrape`).
 | Symbol | Purpose |
 |--------|---------|
 | `get_client(session_file=None, browser=None, username=None, password=None, progress=None, humanizer=None, device_profile="android", geo_profile="de") -> (Client, account)` | Reuse a persisted session → else a browser-cookie bootstrap → else password login. Returns a `fingerprint.Client` and the account name. `device_profile`/`geo_profile` stamp the emulated device and the locale/country/timezone when **minting** a session (never on a reused one). Records the session-validation request and warms up on a cold open when given a `humanizer`. |
+| `login_interactive_free(username, password, code: Callable[[str], str], *, session_dir=None) -> str` | Password login that never reads stdin, for a server whose web form supplies the 2FA/challenge code. Same stable device/geo as `get_client`; saves `<session_dir>/session-<username>.json` (mode 600; default `~/.config/instascraper`), which `get_client` then reuses. When a code is needed it calls `code(via)` with `"SMS"`, `"email"`, `"authenticator app"` (best effort; `"2FA code"` if unknown); `code` may block. Returns the username. Raises `auth.BadPassword`, `auth.CodeTimeout` (the callback raised `TimeoutError`) or `auth.LoginFailed` (all subclasses of `auth.LoginError`); messages never contain the password. |
 | `device_family(settings: dict) -> str` | `"android"` / `"ios"` for a persisted session's settings. |
 | `make_links_clickable(message: str) -> str` | Absolutize the relative challenge URLs Instagram puts in error strings. |
 | `DEFAULT_SESSION_DIR`, `DELAY_RANGE`, `DEVICE_PROFILES`, `SUPPORTED_BROWSERS`, `REQUEST_TIMEOUT`, `IOS_DEVICE`, `IOS_USER_AGENT` | Defaults and the supported enumerations. |
@@ -557,7 +558,7 @@ govern the use — see [Notes & limitations](#notes--limitations).
 
 ```bash
 pip install -e '.[dev]'                  # deps + pytest
-.venv/bin/python -m pytest -q            # 277 network-free, sleep-free tests
+.venv/bin/python -m pytest -q            # 294 network-free, sleep-free tests
 ```
 
 Use the venv interpreter, not a bare `python`: a pyenv shim lacks the deps and
